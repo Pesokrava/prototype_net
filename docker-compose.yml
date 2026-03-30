@@ -1,0 +1,28 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: prototype_net
+      POSTGRES_USER: prototype
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d
+    restart: unless-stopped
+
+  client:
+    build: ./client
+    cap_add:
+      - NET_ADMIN
+    privileged: true
+    depends_on:
+      - postgres
+    environment:
+      DNS_SERVER: ${SERVER_VM_IP}
+      SERVER_IP: ${SERVER_VM_IP}
+    restart: unless-stopped
+
+volumes:
+  pgdata:
