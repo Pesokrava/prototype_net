@@ -1,0 +1,12 @@
+[package]
+name = "common"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = []
+# Enable userspace-only impls (aya::Pod, std conversions)
+userspace = ["aya"]
+
+[dependencies]
+aya = { version = "0.13.1", optional = true }

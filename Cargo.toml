@@ -1,0 +1,11 @@
+[workspace]
+resolver = "2"
+members = [
+    "common",
+    "daemon",
+    "dns-server",
+    "xtask",
+]
+
+# ebpf crate is excluded — it uses nightly + bpfel-unknown-none target
+# and is built separately via `cargo xtask build-ebpf`

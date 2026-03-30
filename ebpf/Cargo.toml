@@ -1,0 +1,16 @@
+[package]
+name = "ebpf"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "ebpf"
+path = "src/main.rs"
+
+[dependencies]
+aya-ebpf = "0.1.1"
+aya-log-ebpf = "0.1.1"
+common = { path = "../common" }
+
+[profile.release]
+panic = "abort"
