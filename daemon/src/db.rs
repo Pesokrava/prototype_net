@@ -1,0 +1,83 @@
+use std::net::Ipv6Addr;
+
+use anyhow::{Context, Result};
+use sqlx::postgres::PgPoolOptions;
+use sqlx::PgPool;
+use tracing::{info, warn};
+
+use crate::maps::BpfMaps;
+
+/// Create a Postgres connection pool.
+pub async fn create_pool(database_url: &str) -> Result<PgPool> {
+    PgPoolOptions::new()
+        .max_connections(5)
+        .connect(database_url)
+        .await
+        .context("failed to connect to Postgres")
+}
+
+/// Listen for domain_changes notifications and update BPF maps.
+pub async fn listen_for_changes(database_url: &str, maps: BpfMaps) -> Result<()> {
+    let mut listener = sqlx::postgres::PgListener::connect(database_url)
+        .await
+        .context("failed to connect PgListener")?;
+
+    listener
+        .listen("domain_changes")
+        .await
+        .context("failed to LISTEN on domain_changes")?;
+
+    info!("Listening for domain_changes notifications...");
+
+    // We need a pool for querying the row details
+    let pool = create_pool(database_url).await?;
+
+    loop {
+        let notification = listener
+            .recv()
+            .await
+            .context("PgListener recv error")?;
+
+        let domain_id: i32 = notification
+            .payload()
+            .parse()
+            .context("invalid domain_id in notification payload")?;
+
+        info!("Received domain_changes notification for domain_id={domain_id}");
+
+        // Fetch the full row
+        let row = sqlx::query!(
+            r#"SELECT domain_id, domain, host(origin_ipv6)::text as "origin_ipv6!", host(synthetic_ipv6)::text as "synthetic_ipv6!" FROM domains WHERE domain_id = $1"#,
+            domain_id
+        )
+        .fetch_optional(&pool)
+        .await
+        .context("failed to fetch domain by domain_id")?;
+
+        match row {
+            Some(row) => {
+                let origin: Ipv6Addr = row
+                    .origin_ipv6
+                    .parse()
+                    .context("invalid origin_ipv6 in notification row")?;
+
+                // Insert into NAT_MAP
+                if let Err(e) = maps.insert_nat_entry(domain_id as u32, origin) {
+                    warn!("Failed to update NAT_MAP for domain_id={domain_id}: {e}");
+                } else {
+                    info!(
+                        "Updated NAT_MAP: domain_id={domain_id} → origin={}",
+                        row.origin_ipv6
+                    );
+                }
+
+                // Note: REVERSE_MAP requires client_ipv6 which depends on VPN session.
+                // For v1, the reverse map would be populated separately when the
+                // tunnel is established and client IP is known.
+            }
+            None => {
+                warn!("Domain with domain_id={domain_id} not found after notification");
+            }
+        }
+    }
+}
