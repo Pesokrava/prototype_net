@@ -32,7 +32,7 @@ pub trait DbOps {
         origin_ipv6: &str,
         synthetic_ipv6: &str,
         ttl_seconds: i32,
-    ) -> Result<()>;
+    ) -> Result<(i32, String)>;
     async fn next_domain_id(&self) -> Result<i32>;
 }
 
@@ -68,8 +68,8 @@ impl DbOps for PgPool {
         origin_ipv6: &str,
         synthetic_ipv6: &str,
         ttl_seconds: i32,
-    ) -> Result<()> {
-        sqlx::query(
+    ) -> Result<(i32, String)> {
+        let row: (i32, String) = sqlx::query_as(
             r#"
             INSERT INTO domains (domain_id, domain, origin_ipv6, synthetic_ipv6, ttl_seconds, last_resolved_at)
             VALUES ($1, $2, $3::inet, $4::inet, $5, now())
@@ -77,6 +77,8 @@ impl DbOps for PgPool {
                 origin_ipv6 = EXCLUDED.origin_ipv6,
                 last_resolved_at = now(),
                 ttl_seconds = EXCLUDED.ttl_seconds
+                -- domain_id and synthetic_ipv6 are stable once assigned; first writer wins
+            RETURNING domain_id, host(synthetic_ipv6::inet)::text
             "#,
         )
         .bind(domain_id)
@@ -84,11 +86,11 @@ impl DbOps for PgPool {
         .bind(origin_ipv6)
         .bind(synthetic_ipv6)
         .bind(ttl_seconds)
-        .execute(self)
+        .fetch_one(self)
         .await
         .context("failed to insert domain")?;
 
-        Ok(())
+        Ok(row)
     }
 
     async fn next_domain_id(&self) -> Result<i32> {

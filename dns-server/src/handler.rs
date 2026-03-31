@@ -103,9 +103,10 @@ impl DnsHandler {
         let synthetic_bytes = common::synthetic_ipv6(domain_id as u32);
         let synthetic_ipv6 = Ipv6Addr::from(synthetic_bytes);
 
-        // 4. Insert into database (triggers NOTIFY)
-        let ttl = 300u32; // default TTL
-        self.db
+        // 4. Insert into database (triggers NOTIFY), use the row actually stored
+        let ttl = 300u32;
+        let (stored_domain_id, stored_synthetic_str) = self
+            .db
             .insert_domain(
                 domain_id,
                 &domain_str,
@@ -115,8 +116,13 @@ impl DnsHandler {
             )
             .await?;
 
+        // Use the stored values, not our speculatively-computed ones
+        let synthetic_ipv6: Ipv6Addr = stored_synthetic_str
+            .parse()
+            .context("invalid synthetic_ipv6 returned from DB")?;
+
         info!(
-            "New mapping: {domain_str} → synthetic={synthetic_ipv6}, origin={origin_ipv6}, domain_id={domain_id}"
+            "New mapping: {domain_str} → synthetic={synthetic_ipv6}, origin={origin_ipv6}, domain_id={stored_domain_id}"
         );
 
         // 5. Return synthetic AAAA record

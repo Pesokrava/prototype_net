@@ -9,8 +9,8 @@ This is a custom DNS server that intercepts AAAA queries, resolves the real orig
 3. If not cached, the upstream resolver fetches the real AAAA record from public DNS.
 4. A new `domain_id` is allocated from the `domain_id_seq` Postgres sequence.
 5. A synthetic IPv6 is constructed via `common::synthetic_ipv6(domain_id)`.
-6. The mapping is inserted into Postgres (triggering `pg_notify('domain_changes', ...)` which the daemon listens to).
-7. The synthetic AAAA record is returned to the client with a 300-second TTL.
+6. The mapping is upserted into Postgres via `INSERT ... ON CONFLICT (domain) DO UPDATE ... RETURNING domain_id, synthetic_ipv6`. The `RETURNING` clause yields the **actually stored** row — under concurrent inserts for the same domain, the first writer wins and all callers receive the winner's canonical address. `domain_id` and `synthetic_ipv6` are never updated on conflict; only `origin_ipv6`, `ttl_seconds`, and `last_resolved_at` are refreshed.
+7. The synthetic AAAA record from the DB-returned row is sent to the client with a 300-second TTL.
 
 A-record queries and all other record types return NXDOMAIN -- this is an IPv6-only system.
 
@@ -19,7 +19,7 @@ A-record queries and all other record types return NXDOMAIN -- this is an IPv6-o
 - `src/main.rs` -- Entry point. Binds a UDP socket, runs the receive/respond loop.
 - `src/handler.rs` -- `DnsHandler` that parses DNS packets, orchestrates lookup/allocation/response.
 - `src/resolver.rs` -- `UpstreamResolver` wrapping `hickory_resolver::TokioAsyncResolver` for AAAA lookups.
-- `src/db.rs` -- `DbOps` trait and `PgPool` implementation for domain storage. Uses UPSERT (`ON CONFLICT`) for idempotent inserts. `next_domain_id()` calls `nextval('domain_id_seq')`.
+- `src/db.rs` -- `DbOps` trait and `PgPool` implementation for domain storage. Uses `INSERT ... ON CONFLICT ... RETURNING` to upsert domains and return the canonically stored `domain_id` and `synthetic_ipv6` (first writer wins). `next_domain_id()` calls `nextval('domain_id_seq')`.
 
 ## Configuration
 
