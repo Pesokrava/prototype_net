@@ -10,6 +10,7 @@ path = "src/main.rs"
 [dependencies]
 aya-ebpf = "0.1.1"
 aya-log-ebpf = "0.1.0"
+# NOTE: edition kept at 2021 -- aya-ebpf 0.1.1 (latest stable) does not yet support edition 2024
 common = { path = "../common" }
 
 [profile.release]
