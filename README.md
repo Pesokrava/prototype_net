@@ -50,7 +50,7 @@ fd00:abcd:XXXX:YYYY::1
 
 ```bash
 cp .env.example .env
-vim .env  # set POSTGRES_PASSWORD, SERVER_VM_IP, TF_VAR_*, INTERFACE_NAME, SERVER_IPV6
+vim .env  # set POSTGRES_PASSWORD, SERVER_VM_IP, TF_VAR_*, INTERFACE_NAME, SERVER_IPV6, CLIENT_IPV6
 ```
 
 ### 2. Start Postgres
@@ -128,6 +128,7 @@ docker exec -it prototype-client curl -v https://youtube.com
 | `TF_VAR_dns_listen_addr` | DNS server bind address | `0.0.0.0` |
 | `INTERFACE_NAME` | Tunnel interface for eBPF TC | (required) |
 | `SERVER_IPV6` | Server's public IPv6 (NAT src) | (required) |
+| `CLIENT_IPV6` | VPN client's IPv6 (IKEv2 traffic selector) | (required) |
 | `DATABASE_URL` | Postgres connection string | (derived) |
 
 ## Project Structure

@@ -8,7 +8,7 @@ The daemon runs as an async Tokio application with three concurrent concerns:
 
 1. **eBPF Loading** (`loader.rs`) -- Loads the pre-compiled eBPF ELF (embedded via `include_bytes!()`), creates a `clsact` qdisc on the tunnel interface, and attaches `tc_ingress` and `tc_egress` as `SchedClassifier` programs. Writes the initial `SERVER_CONFIG` map entry. Pins BPF objects at `/sys/fs/bpf/prototype_net`.
 
-2. **Database Sync** (`db.rs` + `maps.rs`) -- On startup, bulk-loads all domain mappings from Postgres into `NAT_MAP`. Then subscribes to the `domain_changes` Postgres NOTIFY channel via `PgListener`. When the DNS server inserts or updates a domain, the daemon receives the notification and updates the BPF map immediately.
+2. **Database Sync** (`db.rs` + `maps.rs`) -- On startup, bulk-loads all domain mappings from Postgres into both `NAT_MAP` and `REVERSE_MAP`. Then subscribes to the `domain_changes` Postgres NOTIFY channel via `PgListener`. When the DNS server inserts or updates a domain, the daemon receives the notification and updates both BPF maps immediately.
 
 3. **Periodic DNS Re-resolution** (`resolver.rs`) -- Every 60 seconds, fetches all domains from the database, re-resolves their AAAA records via `hickory-resolver`, and updates both the database and BPF maps if an origin IPv6 has changed. This acts as a safety net for DNS TTL expiry.
 
@@ -27,6 +27,7 @@ All configuration is via environment variables:
 - `DATABASE_URL` -- Postgres connection string.
 - `INTERFACE_NAME` -- Network interface to attach eBPF programs to (e.g., `xfrm0`).
 - `SERVER_IPV6` -- The server's public IPv6 address.
+- `CLIENT_IPV6` -- The VPN client's IPv6 address (IKEv2 traffic selector). Used to populate `REVERSE_MAP` so the egress eBPF program can rewrite replies back to the correct client.
 
 ## Build Order Dependency
 

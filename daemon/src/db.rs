@@ -17,7 +17,7 @@ pub async fn create_pool(database_url: &str) -> Result<PgPool> {
 }
 
 /// Listen for domain_changes notifications and update BPF maps.
-pub async fn listen_for_changes(database_url: &str, maps: BpfMaps) -> Result<()> {
+pub async fn listen_for_changes(database_url: &str, maps: BpfMaps, client_ipv6: Ipv6Addr) -> Result<()> {
     let mut listener = sqlx::postgres::PgListener::connect(database_url)
         .await
         .context("failed to connect PgListener")?;
@@ -69,9 +69,14 @@ pub async fn listen_for_changes(database_url: &str, maps: BpfMaps) -> Result<()>
                     );
                 }
 
-                // Note: REVERSE_MAP requires client_ipv6 which depends on VPN session.
-                // For v1, the reverse map would be populated separately when the
-                // tunnel is established and client IP is known.
+                // Insert into REVERSE_MAP
+                if let Err(e) = maps.insert_reverse_entry(origin, domain_id as u32, client_ipv6) {
+                    warn!("Failed to update REVERSE_MAP for domain_id={domain_id}: {e}");
+                } else {
+                    info!(
+                        "Updated REVERSE_MAP: origin={origin_ipv6_text} → domain_id={domain_id}",
+                    );
+                }
             }
             None => {
                 warn!("Domain with domain_id={domain_id} not found after notification");

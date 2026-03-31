@@ -32,7 +32,7 @@ The system works in two phases:
 
 ## Configuration
 
-All runtime configuration is via environment variables. See `.env.example` for the full list. Key variables: `DATABASE_URL`, `INTERFACE_NAME`, `SERVER_IPV6`, `LISTEN_ADDR`.
+All runtime configuration is via environment variables. See `.env.example` for the full list. Key variables: `DATABASE_URL`, `INTERFACE_NAME`, `SERVER_IPV6`, `CLIENT_IPV6`, `LISTEN_ADDR`.
 
 ## Subdirectory Documentation
 

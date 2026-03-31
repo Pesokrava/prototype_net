@@ -110,7 +110,7 @@ impl BpfMaps {
 }
 
 /// Bulk-load all domain mappings from the database into BPF maps.
-pub async fn bulk_load_from_db(bpf: &mut Ebpf, pool: &PgPool) -> Result<usize> {
+pub async fn bulk_load_from_db(bpf: &mut Ebpf, pool: &PgPool, client_ipv6: Ipv6Addr) -> Result<usize> {
     // (domain_id, origin_ipv6_text, synthetic_ipv6_text)
     let rows: Vec<(i32, String, String)> = sqlx::query_as(
         r#"SELECT domain_id, host(origin_ipv6)::text, host(synthetic_ipv6)::text FROM domains"#,
@@ -139,12 +139,24 @@ pub async fn bulk_load_from_db(bpf: &mut Ebpf, pool: &PgPool) -> Result<usize> {
             .context("failed to insert into NAT_MAP during bulk load")?;
     }
 
-    // For REVERSE_MAP we also need to load — but we don't have client_ipv6 stored yet
-    // (that would come from the VPN session). For v1, the reverse map is populated
-    // with a placeholder client IPv6 that gets filled in by the daemon when the
-    // VPN tunnel info is available. For now, we load NAT_MAP only during bulk load.
-    // REVERSE_MAP entries are inserted when domain_changes notifications arrive.
-
     info!("Bulk-loaded {count} entries into NAT_MAP");
+
+    // Also populate REVERSE_MAP (origin_ipv6 → domain_id + client_ipv6)
+    let reverse_map_data = bpf.map_mut("REVERSE_MAP").context("REVERSE_MAP not found")?;
+    let mut reverse_map: BpfHashMap<&mut aya::maps::MapData, [u8; 16], ReverseEntry> =
+        BpfHashMap::try_from(reverse_map_data).context("failed to cast REVERSE_MAP")?;
+    for (domain_id, origin_ipv6_text, _synthetic) in &rows {
+        let origin: Ipv6Addr = origin_ipv6_text.parse().context("invalid origin_ipv6")?;
+        let entry = ReverseEntry {
+            domain_id: *domain_id as u32,
+            _pad: 0,
+            client_ipv6: client_ipv6.octets(),
+        };
+        reverse_map
+            .insert(origin.octets(), entry, 0)
+            .context("failed to insert into REVERSE_MAP during bulk load")?;
+    }
+
+    info!("Bulk-loaded {count} entries into REVERSE_MAP");
     Ok(count)
 }
