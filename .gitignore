@@ -1,4 +1,5 @@
 /target
+/ebpf/target
 certs/output/
 *.iso
 *.qcow2

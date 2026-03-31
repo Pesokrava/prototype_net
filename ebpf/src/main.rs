@@ -52,14 +52,14 @@ const IPV6_NEXTHDR_OFFSET: usize = ETH_HDR_LEN + 6; // next header field
 // ---------------------------------------------------------------------------
 
 #[classifier]
-pub fn tc_ingress(ctx: TcContext) -> i32 {
-    match try_tc_ingress(&ctx) {
+pub fn tc_ingress(mut ctx: TcContext) -> i32 {
+    match try_tc_ingress(&mut ctx) {
         Ok(action) => action,
         Err(_) => TC_ACT_OK, // pass through on error
     }
 }
 
-fn try_tc_ingress(ctx: &TcContext) -> Result<i32, ()> {
+fn try_tc_ingress(ctx: &mut TcContext) -> Result<i32, ()> {
     // Bounds-check: need at least Ethernet + IPv6 header
     let data_end = ctx.data_end();
     let data = ctx.data();
@@ -160,14 +160,14 @@ fn try_tc_ingress(ctx: &TcContext) -> Result<i32, ()> {
 // ---------------------------------------------------------------------------
 
 #[classifier]
-pub fn tc_egress(ctx: TcContext) -> i32 {
-    match try_tc_egress(&ctx) {
+pub fn tc_egress(mut ctx: TcContext) -> i32 {
+    match try_tc_egress(&mut ctx) {
         Ok(action) => action,
         Err(_) => TC_ACT_OK,
     }
 }
 
-fn try_tc_egress(ctx: &TcContext) -> Result<i32, ()> {
+fn try_tc_egress(ctx: &mut TcContext) -> Result<i32, ()> {
     let data_end = ctx.data_end();
     let data = ctx.data();
     if data + ETH_HDR_LEN + IPV6_HDR_LEN > data_end {
@@ -242,7 +242,7 @@ fn try_tc_egress(ctx: &TcContext) -> Result<i32, ()> {
 // ---------------------------------------------------------------------------
 
 fn update_l4_csum_ipv6(
-    ctx: &TcContext,
+    ctx: &mut TcContext,
     nexthdr: u8,
     old_src: &[u8; 16],
     new_src: &[u8; 16],

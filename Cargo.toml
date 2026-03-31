@@ -4,9 +4,9 @@ members = [
   "common",
   "daemon",
   "dns-server",
-  "ebpf",
   "xtask",
 ]
 
 # ebpf crate is excluded — it uses nightly + bpfel-unknown-none target
 # and is built separately via `cargo xtask build-ebpf`
+exclude = ["ebpf"]
