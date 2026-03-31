@@ -1,14 +1,16 @@
 use std::net::Ipv6Addr;
 
 use anyhow::{Context, Result};
-use hickory_resolver::{config::*, TokioAsyncResolver};
+use hickory_resolver::config::*;
+use hickory_resolver::name_server::TokioConnectionProvider;
+use hickory_resolver::{ResolveErrorKind, TokioResolver};
 
 pub struct UpstreamResolver {
-    resolver: TokioAsyncResolver,
+    resolver: TokioResolver,
 }
 
 impl UpstreamResolver {
-    pub fn new(resolver: TokioAsyncResolver) -> Self {
+    pub fn new(resolver: TokioResolver) -> Self {
         Self { resolver }
     }
 
@@ -17,27 +19,34 @@ impl UpstreamResolver {
     pub async fn lookup_aaaa(&self, domain: &str) -> Result<Option<Ipv6Addr>> {
         match self.resolver.ipv6_lookup(domain).await {
             Ok(lookup) => {
-                // Take the first AAAA record
-                let ip = lookup.iter().next().copied();
+                // Take the first AAAA record; AAAA derefs to Ipv6Addr
+                let ip = lookup.iter().next().map(|a| **a);
                 Ok(ip)
             }
             Err(e) => {
-                // If the domain doesn't exist or has no AAAA, return None
-                use hickory_resolver::error::ResolveErrorKind;
-                match e.kind() {
-                    ResolveErrorKind::NoRecordsFound { .. } => Ok(None),
-                    _ => Err(e).context(format!("upstream AAAA lookup failed for {domain}")),
+                // If the domain doesn't exist or has no AAAA, return None.
+                // In hickory-resolver 0.25, NoRecordsFound moved to ProtoErrorKind,
+                // but ProtoError exposes is_no_records_found() for convenience.
+                let is_no_records = match e.kind() {
+                    ResolveErrorKind::Proto(proto_err) => proto_err.is_no_records_found(),
+                    _ => false,
+                };
+                if is_no_records {
+                    Ok(None)
+                } else {
+                    Err(e).context(format!("upstream AAAA lookup failed for {domain}"))
                 }
             }
         }
     }
 }
 
-/// Create an upstream resolver using system DNS configuration.
+/// Create an upstream resolver using the default DNS configuration.
 pub async fn create_resolver() -> Result<UpstreamResolver> {
-    let resolver = TokioAsyncResolver::tokio(
+    let resolver = TokioResolver::builder_with_config(
         ResolverConfig::default(),
-        ResolverOpts::default(),
-    );
+        TokioConnectionProvider::default(),
+    )
+    .build();
     Ok(UpstreamResolver::new(resolver))
 }

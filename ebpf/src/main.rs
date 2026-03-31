@@ -140,10 +140,14 @@ fn try_tc_ingress(ctx: &mut TcContext) -> Result<i32, ()> {
         update_l4_csum_ipv6(
             ctx,
             nexthdr,
-            &orig_src,
-            &server_cfg.server_pub_ipv6,
-            &orig_dst,
-            &nat_entry.origin_ipv6,
+            &AddrChange {
+                old: orig_src,
+                new: server_cfg.server_pub_ipv6,
+            },
+            &AddrChange {
+                old: orig_dst,
+                new: nat_entry.origin_ipv6,
+            },
         )?;
     }
 
@@ -224,10 +228,14 @@ fn try_tc_egress(ctx: &mut TcContext) -> Result<i32, ()> {
         update_l4_csum_ipv6(
             ctx,
             nexthdr,
-            &orig_src,
-            &synthetic,
-            &orig_dst,
-            &rev_entry.client_ipv6,
+            &AddrChange {
+                old: orig_src,
+                new: synthetic,
+            },
+            &AddrChange {
+                old: orig_dst,
+                new: rev_entry.client_ipv6,
+            },
         )?;
     }
 
@@ -239,15 +247,22 @@ fn try_tc_egress(ctx: &mut TcContext) -> Result<i32, ()> {
 //
 // IPv6 pseudo-header includes src + dst addresses (each 16 bytes = 8 u16 words).
 // We update the checksum by subtracting old and adding new address words.
+//
+// Parameters are bundled into two structs to stay within the eBPF 5-argument
+// calling convention limit (&mut TcContext + &AddrChange + &AddrChange = 3).
 // ---------------------------------------------------------------------------
 
+struct AddrChange {
+    old: [u8; 16],
+    new: [u8; 16],
+}
+
+#[inline(always)]
 fn update_l4_csum_ipv6(
     ctx: &mut TcContext,
     nexthdr: u8,
-    old_src: &[u8; 16],
-    new_src: &[u8; 16],
-    old_dst: &[u8; 16],
-    new_dst: &[u8; 16],
+    src: &AddrChange,
+    dst: &AddrChange,
 ) -> Result<(), ()> {
     // L4 checksum offset depends on protocol
     let l4_offset = ETH_HDR_LEN + IPV6_HDR_LEN;
@@ -257,21 +272,20 @@ fn update_l4_csum_ipv6(
         l4_offset + 6 // UDP checksum at offset 6
     };
 
-    // Use l4_csum_replace for each 4-byte word of the address change
-    // Process src address (4 x u32 words)
+    // Process src address change (4 x u32 words)
     for i in 0..4 {
         let off = i * 4;
         let old_word = u32::from_be_bytes([
-            old_src[off],
-            old_src[off + 1],
-            old_src[off + 2],
-            old_src[off + 3],
+            src.old[off],
+            src.old[off + 1],
+            src.old[off + 2],
+            src.old[off + 3],
         ]);
         let new_word = u32::from_be_bytes([
-            new_src[off],
-            new_src[off + 1],
-            new_src[off + 2],
-            new_src[off + 3],
+            src.new[off],
+            src.new[off + 1],
+            src.new[off + 2],
+            src.new[off + 3],
         ]);
         if old_word != new_word {
             ctx.l4_csum_replace(csum_offset, old_word as u64, new_word as u64, 4)
@@ -279,20 +293,20 @@ fn update_l4_csum_ipv6(
         }
     }
 
-    // Process dst address
+    // Process dst address change
     for i in 0..4 {
         let off = i * 4;
         let old_word = u32::from_be_bytes([
-            old_dst[off],
-            old_dst[off + 1],
-            old_dst[off + 2],
-            old_dst[off + 3],
+            dst.old[off],
+            dst.old[off + 1],
+            dst.old[off + 2],
+            dst.old[off + 3],
         ]);
         let new_word = u32::from_be_bytes([
-            new_dst[off],
-            new_dst[off + 1],
-            new_dst[off + 2],
-            new_dst[off + 3],
+            dst.new[off],
+            dst.new[off + 1],
+            dst.new[off + 2],
+            dst.new[off + 3],
         ]);
         if old_word != new_word {
             ctx.l4_csum_replace(csum_offset, old_word as u64, new_word as u64, 4)

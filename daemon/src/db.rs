@@ -45,19 +45,18 @@ pub async fn listen_for_changes(database_url: &str, maps: BpfMaps) -> Result<()>
 
         info!("Received domain_changes notification for domain_id={domain_id}");
 
-        // Fetch the full row
-        let row = sqlx::query!(
-            r#"SELECT domain_id, domain, host(origin_ipv6)::text as "origin_ipv6!", host(synthetic_ipv6)::text as "synthetic_ipv6!" FROM domains WHERE domain_id = $1"#,
-            domain_id
+        // Fetch the full row: (domain_id, domain, origin_ipv6_text, synthetic_ipv6_text)
+        let row: Option<(i32, String, String, String)> = sqlx::query_as(
+            r#"SELECT domain_id, domain, host(origin_ipv6)::text, host(synthetic_ipv6)::text FROM domains WHERE domain_id = $1"#,
         )
+        .bind(domain_id)
         .fetch_optional(&pool)
         .await
         .context("failed to fetch domain by domain_id")?;
 
         match row {
-            Some(row) => {
-                let origin: Ipv6Addr = row
-                    .origin_ipv6
+            Some((_id, _domain, origin_ipv6_text, _synthetic)) => {
+                let origin: Ipv6Addr = origin_ipv6_text
                     .parse()
                     .context("invalid origin_ipv6 in notification row")?;
 
@@ -66,8 +65,7 @@ pub async fn listen_for_changes(database_url: &str, maps: BpfMaps) -> Result<()>
                     warn!("Failed to update NAT_MAP for domain_id={domain_id}: {e}");
                 } else {
                     info!(
-                        "Updated NAT_MAP: domain_id={domain_id} → origin={}",
-                        row.origin_ipv6
+                        "Updated NAT_MAP: domain_id={domain_id} → origin={origin_ipv6_text}",
                     );
                 }
 

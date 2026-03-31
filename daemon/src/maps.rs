@@ -1,8 +1,10 @@
 use std::net::Ipv6Addr;
+use std::os::fd::{AsFd, AsRawFd};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
-use aya::maps::HashMap as BpfHashMap;
+use aya::maps::hash_map::HashMap as BpfHashMap;
+use aya::maps::IterableMap;
 use aya::Ebpf;
 use common::{NatEntry, ReverseEntry};
 use sqlx::PgPool;
@@ -25,12 +27,17 @@ impl BpfMaps {
         let nat_map = bpf
             .map("NAT_MAP")
             .context("NAT_MAP not found")?;
-        let nat_fd = nat_map.fd().as_fd().as_raw_fd();
+        // Get fd via TryFrom<&Map> → HashMap<&MapData, ..> → IterableMap::map() → fd()
+        let nat_ref: BpfHashMap<&aya::maps::MapData, u32, NatEntry> =
+            BpfHashMap::try_from(nat_map).context("failed to cast NAT_MAP")?;
+        let nat_fd = nat_ref.map().fd().as_fd().as_raw_fd();
 
         let reverse_map = bpf
             .map("REVERSE_MAP")
             .context("REVERSE_MAP not found")?;
-        let reverse_fd = reverse_map.fd().as_fd().as_raw_fd();
+        let reverse_ref: BpfHashMap<&aya::maps::MapData, [u8; 16], ReverseEntry> =
+            BpfHashMap::try_from(reverse_map).context("failed to cast REVERSE_MAP")?;
+        let reverse_fd = reverse_ref.map().fd().as_fd().as_raw_fd();
 
         Ok(Self {
             inner: Arc::new(Mutex::new(BpfMapsInner {
@@ -52,8 +59,9 @@ impl BpfMaps {
         let fd = unsafe { BorrowedFd::borrow_raw(inner.nat_map_fd) };
         let map_data = aya::maps::MapData::from_fd(fd.try_clone_to_owned()?)
             .context("failed to open NAT_MAP from fd")?;
-        let mut map: BpfHashMap<_, u32, NatEntry> = BpfHashMap::try_from(map_data)
-            .context("failed to cast NAT_MAP")?;
+        let mut map: BpfHashMap<_, u32, NatEntry> =
+            BpfHashMap::try_from(aya::maps::Map::HashMap(map_data))
+                .context("failed to cast NAT_MAP")?;
         map.insert(domain_id, entry, 0)
             .context("failed to insert into NAT_MAP")?;
         Ok(())
@@ -78,8 +86,9 @@ impl BpfMaps {
         let fd = unsafe { BorrowedFd::borrow_raw(inner.reverse_map_fd) };
         let map_data = aya::maps::MapData::from_fd(fd.try_clone_to_owned()?)
             .context("failed to open REVERSE_MAP from fd")?;
-        let mut map: BpfHashMap<_, [u8; 16], ReverseEntry> = BpfHashMap::try_from(map_data)
-            .context("failed to cast REVERSE_MAP")?;
+        let mut map: BpfHashMap<_, [u8; 16], ReverseEntry> =
+            BpfHashMap::try_from(aya::maps::Map::HashMap(map_data))
+                .context("failed to cast REVERSE_MAP")?;
         map.insert(key, entry, 0)
             .context("failed to insert into REVERSE_MAP")?;
         Ok(())
@@ -92,19 +101,19 @@ impl BpfMaps {
         let fd = unsafe { BorrowedFd::borrow_raw(inner.nat_map_fd) };
         let map_data = aya::maps::MapData::from_fd(fd.try_clone_to_owned()?)
             .context("failed to open NAT_MAP from fd")?;
-        let mut map: BpfHashMap<_, u32, NatEntry> = BpfHashMap::try_from(map_data)
-            .context("failed to cast NAT_MAP")?;
+        let mut map: BpfHashMap<_, u32, NatEntry> =
+            BpfHashMap::try_from(aya::maps::Map::HashMap(map_data))
+                .context("failed to cast NAT_MAP")?;
         let _ = map.remove(&domain_id); // ignore if not present
         Ok(())
     }
 }
 
-use std::os::fd::AsRawFd;
-
 /// Bulk-load all domain mappings from the database into BPF maps.
 pub async fn bulk_load_from_db(bpf: &mut Ebpf, pool: &PgPool) -> Result<usize> {
-    let rows = sqlx::query!(
-        r#"SELECT domain_id, host(origin_ipv6)::text as "origin_ipv6!", host(synthetic_ipv6)::text as "synthetic_ipv6!" FROM domains"#
+    // (domain_id, origin_ipv6_text, synthetic_ipv6_text)
+    let rows: Vec<(i32, String, String)> = sqlx::query_as(
+        r#"SELECT domain_id, host(origin_ipv6)::text, host(synthetic_ipv6)::text FROM domains"#,
     )
     .fetch_all(pool)
     .await
@@ -118,16 +127,15 @@ pub async fn bulk_load_from_db(bpf: &mut Ebpf, pool: &PgPool) -> Result<usize> {
 
     let count = rows.len();
 
-    for row in &rows {
-        let origin: Ipv6Addr = row
-            .origin_ipv6
+    for (domain_id, origin_ipv6_text, _synthetic) in &rows {
+        let origin: Ipv6Addr = origin_ipv6_text
             .parse()
             .context("invalid origin_ipv6 in DB")?;
         let entry = NatEntry {
             origin_ipv6: origin.octets(),
         };
         nat_map
-            .insert(row.domain_id as u32, entry, 0)
+            .insert(*domain_id as u32, entry, 0)
             .context("failed to insert into NAT_MAP during bulk load")?;
     }
 

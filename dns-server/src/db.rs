@@ -38,21 +38,25 @@ pub trait DbOps {
 
 impl DbOps for PgPool {
     async fn find_by_domain(&self, domain: &str) -> Result<Option<DomainRow>> {
-        let row = sqlx::query_as!(
-            DomainRow,
+        let row: Option<(i32, String, String, String, Option<i32>)> = sqlx::query_as(
             r#"
-            SELECT domain_id, domain, host(origin_ipv6)::text as "origin_ipv6!",
-                   host(synthetic_ipv6)::text as "synthetic_ipv6!", ttl_seconds
+            SELECT domain_id, domain, host(origin_ipv6)::text, host(synthetic_ipv6)::text, ttl_seconds
             FROM domains
             WHERE domain = $1
             "#,
-            domain
         )
+        .bind(domain)
         .fetch_optional(self)
         .await
         .context("failed to query domains table")?;
 
-        Ok(row)
+        Ok(row.map(|(domain_id, domain, origin_ipv6, synthetic_ipv6, ttl_seconds)| DomainRow {
+            domain_id,
+            domain,
+            origin_ipv6,
+            synthetic_ipv6,
+            ttl_seconds,
+        }))
     }
 
     async fn insert_domain(
@@ -63,7 +67,7 @@ impl DbOps for PgPool {
         synthetic_ipv6: &str,
         ttl_seconds: i32,
     ) -> Result<()> {
-        sqlx::query!(
+        sqlx::query(
             r#"
             INSERT INTO domains (domain_id, domain, origin_ipv6, synthetic_ipv6, ttl_seconds, last_resolved_at)
             VALUES ($1, $2, $3::inet, $4::inet, $5, now())
@@ -72,12 +76,12 @@ impl DbOps for PgPool {
                 last_resolved_at = now(),
                 ttl_seconds = EXCLUDED.ttl_seconds
             "#,
-            domain_id,
-            domain,
-            origin_ipv6,
-            synthetic_ipv6,
-            ttl_seconds
         )
+        .bind(domain_id)
+        .bind(domain)
+        .bind(origin_ipv6)
+        .bind(synthetic_ipv6)
+        .bind(ttl_seconds)
         .execute(self)
         .await
         .context("failed to insert domain")?;
@@ -86,13 +90,13 @@ impl DbOps for PgPool {
     }
 
     async fn next_domain_id(&self) -> Result<i32> {
-        let row = sqlx::query_scalar!(
-            r#"SELECT nextval('domain_id_seq')::integer as "id!""#
+        let row: (i64,) = sqlx::query_as(
+            r#"SELECT nextval('domain_id_seq')"#,
         )
         .fetch_one(self)
         .await
         .context("failed to get next domain_id from sequence")?;
 
-        Ok(row)
+        Ok(row.0 as i32)
     }
 }

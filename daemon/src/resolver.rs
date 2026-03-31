@@ -23,8 +23,9 @@ pub async fn run_periodic_resolver(pool: PgPool, maps: BpfMaps) {
 }
 
 async fn resolve_all(pool: &PgPool, maps: &BpfMaps) -> Result<()> {
-    let rows = sqlx::query!(
-        r#"SELECT domain_id, domain, host(origin_ipv6)::text as "origin_ipv6!" FROM domains"#
+    // (domain_id, domain, origin_ipv6_text)
+    let rows: Vec<(i32, String, String)> = sqlx::query_as(
+        r#"SELECT domain_id, domain, host(origin_ipv6)::text FROM domains"#,
     )
     .fetch_all(pool)
     .await
@@ -32,42 +33,41 @@ async fn resolve_all(pool: &PgPool, maps: &BpfMaps) -> Result<()> {
 
     // Use the system resolver for upstream lookups
     use hickory_resolver::config::*;
-    let resolver = hickory_resolver::TokioAsyncResolver::tokio(
+    use hickory_resolver::TokioResolver;
+    let resolver = TokioResolver::builder_with_config(
         ResolverConfig::default(),
-        ResolverOpts::default(),
-    );
+        hickory_resolver::name_server::TokioConnectionProvider::default(),
+    )
+    .build();
 
-    for row in rows {
-        match resolver.ipv6_lookup(&row.domain).await {
+    for (domain_id, domain, origin_ipv6_text) in rows {
+        match resolver.ipv6_lookup(&domain).await {
             Ok(lookup) => {
-                if let Some(new_ip) = lookup.iter().next() {
+                if let Some(new_ip) = lookup.iter().next().map(|a| **a) {
                     let new_ip_str = new_ip.to_string();
-                    if new_ip_str != row.origin_ipv6 {
+                    if new_ip_str != origin_ipv6_text {
                         info!(
                             "Origin changed for {}: {} → {}",
-                            row.domain, row.origin_ipv6, new_ip_str
+                            domain, origin_ipv6_text, new_ip_str
                         );
 
                         // Update database
-                        sqlx::query!(
+                        sqlx::query(
                             r#"UPDATE domains SET origin_ipv6 = $1::inet, last_resolved_at = now() WHERE domain_id = $2"#,
-                            new_ip_str,
-                            row.domain_id
                         )
+                        .bind(&new_ip_str)
+                        .bind(domain_id)
                         .execute(pool)
                         .await
                         .context("failed to update origin_ipv6")?;
 
                         // Update BPF NAT_MAP
-                        let new_ipv6: Ipv6Addr = new_ip_str
-                            .parse()
-                            .context("invalid new origin IPv6")?;
-                        maps.insert_nat_entry(row.domain_id as u32, new_ipv6)?;
+                        maps.insert_nat_entry(domain_id as u32, new_ip)?;
                     }
                 }
             }
             Err(e) => {
-                warn!("Re-resolution failed for {}: {e}", row.domain);
+                warn!("Re-resolution failed for {}: {e}", domain);
             }
         }
     }

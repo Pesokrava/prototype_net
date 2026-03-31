@@ -7,7 +7,7 @@ use hickory_resolver::proto::rr::rdata::AAAA;
 use hickory_resolver::proto::rr::{Name, RData, Record, RecordType};
 use tracing::{debug, info, warn};
 
-use crate::db::DbPool;
+use crate::db::{DbOps, DbPool};
 use crate::resolver::UpstreamResolver;
 
 pub struct DnsHandler {

@@ -26,6 +26,8 @@ fn main() -> Result<()> {
 }
 
 fn build_ebpf() -> Result<()> {
+    let workspace = workspace_root()?;
+
     let status = Command::new("cargo")
         .args([
             "+nightly",
@@ -35,10 +37,9 @@ fn build_ebpf() -> Result<()> {
             "--target",
             "bpfel-unknown-none",
             "--release",
-            "-p",
-            "ebpf",
         ])
-        .current_dir(workspace_root()?)
+        .env("CARGO_TARGET_DIR", workspace.join("target"))
+        .current_dir(workspace.join("ebpf"))
         .status()
         .context("failed to run cargo +nightly build for eBPF")?;
 
@@ -46,7 +47,7 @@ fn build_ebpf() -> Result<()> {
         bail!("eBPF build failed with status: {status}");
     }
 
-    let elf_path = workspace_root()?
+    let elf_path = workspace
         .join("target")
         .join("bpfel-unknown-none")
         .join("release")
