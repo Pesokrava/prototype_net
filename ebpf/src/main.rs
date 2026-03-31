@@ -15,6 +15,8 @@ use common::{NatEntry, ReverseEntry, ServerConfig, SYNTHETIC_PREFIX};
 use network_types::{
     eth::{EthHdr, EtherType},
     ip::{IpProto, Ipv6Hdr},
+    tcp::TcpHdr,
+    udp::UdpHdr,
 };
 
 // ---------------------------------------------------------------------------
@@ -137,6 +139,20 @@ fn try_tc_ingress(ctx: &mut TcContext) -> Result<i32, ()> {
         }
     }
 
+    // Bounds-check the L4 header before any packet mutation.  This ensures
+    // that the checksum field (TCP offset 16, UDP offset 6) is reachable and
+    // prevents forwarding a packet whose addresses were rewritten but whose
+    // L4 checksum could not be updated (partial-rewrite correctness bug).
+    let l4_base = EthHdr::LEN + Ipv6Hdr::LEN;
+    match nexthdr {
+        IpProto::Tcp => {
+            let _: *const TcpHdr = unsafe { ptr_at(ctx, l4_base)? };
+        }
+        _ => {
+            let _: *const UdpHdr = unsafe { ptr_at(ctx, l4_base)? };
+        }
+    }
+
     // Read destination IPv6 address.
     let dst_ipv6: [u8; 16] = unsafe { (*ipv6hdr).dst_addr };
 
@@ -172,8 +188,8 @@ fn try_tc_ingress(ctx: &mut TcContext) -> Result<i32, ()> {
     // Save original src for checksum fixup (read before any stores).
     let orig_src: [u8; 16] = unsafe { (*ipv6hdr).src_addr };
 
-    // L4 checksum offset (nexthdr is guaranteed TCP or UDP here).
-    let l4_base = EthHdr::LEN + Ipv6Hdr::LEN;
+    // L4 checksum offset (nexthdr is guaranteed TCP or UDP here;
+    // l4_base is already defined above from the bounds check).
     let csum_offset = match nexthdr {
         IpProto::Tcp => l4_base + 16,
         _ => l4_base + 6, // UDP
@@ -251,14 +267,28 @@ fn try_tc_egress(ctx: &mut TcContext) -> Result<i32, ()> {
         }
     }
 
+    // Bounds-check the L4 header before any packet mutation.  This ensures
+    // that the checksum field (TCP offset 16, UDP offset 6) is reachable and
+    // prevents forwarding a packet whose addresses were rewritten but whose
+    // L4 checksum could not be updated (partial-rewrite correctness bug).
+    let l4_base = EthHdr::LEN + Ipv6Hdr::LEN;
+    match nexthdr {
+        IpProto::Tcp => {
+            let _: *const TcpHdr = unsafe { ptr_at(ctx, l4_base)? };
+        }
+        _ => {
+            let _: *const UdpHdr = unsafe { ptr_at(ctx, l4_base)? };
+        }
+    }
+
     // Save original dst for checksum fixup (read before any stores).
     let orig_dst: [u8; 16] = unsafe { (*ipv6hdr).dst_addr };
 
     // Build synthetic IPv6 from domain_id.
     let synthetic = common::synthetic_ipv6(rev_entry.domain_id);
 
-    // L4 checksum offset (nexthdr is guaranteed TCP or UDP here).
-    let l4_base = EthHdr::LEN + Ipv6Hdr::LEN;
+    // L4 checksum offset (nexthdr is guaranteed TCP or UDP here;
+    // l4_base is already defined above from the bounds check).
     let csum_offset = match nexthdr {
         IpProto::Tcp => l4_base + 16,
         _ => l4_base + 6, // UDP
