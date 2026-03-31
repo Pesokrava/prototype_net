@@ -26,11 +26,22 @@ Three BPF maps are defined here and populated by the userspace `daemon/`:
 - Build via: `cargo xtask build-ebpf` (never `cargo build` directly from workspace root).
 - The compiled ELF is output to `target/bpfel-unknown-none/release/ebpf` and is embedded into the `daemon` binary via `include_bytes!()`.
 
+## Dependencies
+
+- `aya-ebpf` / `aya-log-ebpf` -- eBPF framework and logging.
+- `network-types` -- `no_std` crate providing typed structs for Ethernet, IPv4/IPv6, TCP,
+  UDP, and ICMP headers (`EthHdr`, `Ipv6Hdr`, `IpProto`, etc.). Replaces hand-rolled
+  byte-offset constants with verified struct definitions and enums, eliminating the class of
+  bug where a wrong offset silently reads the wrong byte. Packet header access uses
+  bounds-checked pointer casting (`ptr_at` helper) rather than `ctx.load()`.
+- `common` (local) -- shared `NatEntry`, `ReverseEntry`, `ServerConfig` types.
+
 ## Conventions
 
 - `#![no_std]` and `#![no_main]` are required -- this is kernel code.
 - All BPF map lookups use `unsafe` blocks (required by `aya-ebpf`).
 - On parse/lookup failures, programs return `TC_ACT_OK` (pass-through) rather than dropping packets, to avoid disrupting non-matching traffic.
-- Packet manipulation is done at the byte level via `ctx.load()` / `ctx.store()`.
+- Protocol header access uses typed `network-types` structs via a `ptr_at` bounds-check
+  helper; raw `ctx.load()` is reserved for fields not covered by `network-types`.
 - The panic handler is an infinite loop (required for no_std eBPF targets).
 - Shared types (`NatEntry`, `ReverseEntry`, `ServerConfig`) come from the `common/` crate (no_std, no `userspace` feature).

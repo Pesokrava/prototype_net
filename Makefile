@@ -9,6 +9,7 @@
 #   make dev-up        — create + start the Lima build VM (first run: ~3-5 min)
 #   make dev-shell     — open a shell inside the build VM
 #   make dev-build     — build eBPF + daemon + dns-server inside the VM
+#   make dev-build-ebpf — build only eBPF inside the VM
 #   make dev-down      — stop the build VM (disk preserved)
 #   make dev-destroy   — permanently delete the build VM
 #   make certs         — generate TLS certificates
@@ -55,7 +56,7 @@ LIMA            = limactl shell $(DEV_VM_NAME)
 # Phony targets
 # ---------------------------------------------------------------------------
 
-.PHONY: help dev-up dev-shell dev-build dev-down dev-destroy \
+.PHONY: help dev-up dev-shell dev-build dev-build-ebpf dev-down dev-destroy \
         certs \
         vm-up vm-ip vm-down vm-ssh \
         postgres-up postgres-down \
@@ -76,6 +77,7 @@ help:
 	@echo "    dev-up         Create + start the Lima build VM"
 	@echo "    dev-shell      Open an interactive shell inside the build VM"
 	@echo "    dev-build      Build eBPF + daemon + dns-server inside the VM"
+	@echo "    dev-build-ebpf Build only eBPF inside the VM"
 	@echo "    dev-down       Stop the build VM (disk preserved)"
 	@echo "    dev-destroy    Permanently delete the build VM"
 	@echo ""
@@ -141,6 +143,13 @@ dev-build:
 		echo "" && \
 		echo "==> Build complete:" && \
 		ls -lh $(REPO_PATH)/$(RELEASE_DIR)/daemon $(REPO_PATH)/$(RELEASE_DIR)/dns-server'
+
+dev-build-ebpf:
+	@echo "==> Building eBPF inside Lima VM '$(DEV_VM_NAME)'..."
+	$(LIMA) bash -c 'cd $(REPO_PATH) && \
+		source $$HOME/.cargo/env && \
+		cargo xtask build-ebpf'
+	@echo "==> eBPF build complete."
 
 dev-down:
 	@echo "==> Stopping Lima build VM '$(DEV_VM_NAME)'..."

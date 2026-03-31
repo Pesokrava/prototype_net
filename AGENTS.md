@@ -53,6 +53,7 @@ Each top-level subdirectory contains its own `AGENTS.md` with detailed context a
 
 - **Dual toolchain**: Stable for userspace, nightly for eBPF. Separate `rust-toolchain.toml` in `ebpf/`.
 - **Aya eBPF framework**: `aya-ebpf` for kernel programs, `aya` for userspace loader.
+- **network-types**: `no_std` crate for typed protocol header structs (`EthHdr`, `Ipv6Hdr`, `IpProto`, etc.) used in the eBPF crate. Prefer these over hand-rolled byte-offset constants.
 - **Feature-gated code**: `common` crate uses a `userspace` feature for `aya::Pod` implementations.
 - **Async Rust**: Tokio runtime in both `daemon` and `dns-server`.
 - **Error handling**: `anyhow` with `.context()` throughout userspace code.

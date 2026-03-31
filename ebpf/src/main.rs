@@ -1,6 +1,8 @@
 #![no_std]
 #![no_main]
 
+use core::mem;
+
 use aya_ebpf::{
     bindings::TC_ACT_OK,
     bindings::TC_ACT_SHOT,
@@ -10,6 +12,10 @@ use aya_ebpf::{
 };
 use aya_log_ebpf::info;
 use common::{NatEntry, ReverseEntry, ServerConfig, SYNTHETIC_PREFIX};
+use network_types::{
+    eth::{EthHdr, EtherType},
+    ip::{IpProto, Ipv6Hdr},
+};
 
 // ---------------------------------------------------------------------------
 // BPF Maps
@@ -28,21 +34,63 @@ static REVERSE_MAP: HashMap<[u8; 16], ReverseEntry> = HashMap::with_max_entries(
 static SERVER_CONFIG: Array<ServerConfig> = Array::with_max_entries(1, 0);
 
 // ---------------------------------------------------------------------------
-// Constants
+// Packet offset constants (derived from network-types struct sizes)
 // ---------------------------------------------------------------------------
 
-const ETH_HDR_LEN: usize = 14;
-const IPV6_HDR_LEN: usize = 40;
-const ETH_P_IPV6: u16 = 0x86DD;
+// Byte offset of the IPv6 src address field within the packet.
+// EthHdr (14 bytes) + vcf(4) + payload_len(2) + next_hdr(1) + hop_limit(1) = offset 22.
+const IPV6_SRC_OFFSET: usize = EthHdr::LEN + 8;
+// Byte offset of the IPv6 dst address field within the packet.
+// src_addr is 16 bytes after IPV6_SRC_OFFSET.
+const IPV6_DST_OFFSET: usize = EthHdr::LEN + 24;
 
-// IPv6 next-header protocol numbers
-const IPPROTO_TCP: u8 = 6;
-const IPPROTO_UDP: u8 = 17;
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
-// Offsets within the IPv6 header (after Ethernet header)
-const IPV6_SRC_OFFSET: usize = ETH_HDR_LEN + 8; // src addr starts at byte 8 of IPv6 hdr
-const IPV6_DST_OFFSET: usize = ETH_HDR_LEN + 24; // dst addr starts at byte 24 of IPv6 hdr
-const IPV6_NEXTHDR_OFFSET: usize = ETH_HDR_LEN + 6; // next header field
+/// Return a raw pointer to type `T` at `offset` bytes into the packet,
+/// or `Err(())` if that would exceed the packet's data_end boundary.
+#[inline(always)]
+unsafe fn ptr_at<T>(ctx: &TcContext, offset: usize) -> Result<*const T, ()> {
+    let start = ctx.data();
+    let end = ctx.data_end();
+    if start + offset + mem::size_of::<T>() > end {
+        return Err(());
+    }
+    Ok((start + offset) as *const T)
+}
+
+/// Update the L4 checksum for a single address change (one 16-byte IPv6 address).
+/// Processes the address as 4 × u32 words using incremental checksum replacement.
+/// Not inlined — keeps the call stack shallow in both TC programs.
+#[inline(never)]
+fn update_addr_csum(
+    ctx: &mut TcContext,
+    csum_offset: usize,
+    old_addr: &[u8; 16],
+    new_addr: &[u8; 16],
+) -> Result<(), ()> {
+    for i in 0..4 {
+        let off = i * 4;
+        let old_word = u32::from_be_bytes([
+            old_addr[off],
+            old_addr[off + 1],
+            old_addr[off + 2],
+            old_addr[off + 3],
+        ]);
+        let new_word = u32::from_be_bytes([
+            new_addr[off],
+            new_addr[off + 1],
+            new_addr[off + 2],
+            new_addr[off + 3],
+        ]);
+        if old_word != new_word {
+            ctx.l4_csum_replace(csum_offset, old_word as u64, new_word as u64, 4)
+                .map_err(|_| ())?;
+        }
+    }
+    Ok(())
+}
 
 // ---------------------------------------------------------------------------
 // TC Ingress — client→origin direction
@@ -60,29 +108,37 @@ pub fn tc_ingress(mut ctx: TcContext) -> i32 {
 }
 
 fn try_tc_ingress(ctx: &mut TcContext) -> Result<i32, ()> {
-    // Bounds-check: need at least Ethernet + IPv6 header
-    let data_end = ctx.data_end();
-    let data = ctx.data();
-    if data + ETH_HDR_LEN + IPV6_HDR_LEN > data_end {
+    // Parse Ethernet header — ptr_at enforces the bounds check.
+    let ethhdr: *const EthHdr = unsafe { ptr_at(ctx, 0)? };
+    if unsafe { (*ethhdr).ether_type() } != Ok(EtherType::Ipv6) {
         return Ok(TC_ACT_OK);
     }
 
-    // Check EtherType == IPv6
-    let ethertype: u16 = ctx.load::<u16>(12).map_err(|_| ())?;
-    if ethertype != ETH_P_IPV6.to_be() && ethertype != ETH_P_IPV6 {
-        return Ok(TC_ACT_OK);
-    }
-    // Read the raw u16 and compare in network byte order
-    let ethertype_be = u16::from_be(ethertype);
-    if ethertype_be != ETH_P_IPV6 {
-        return Ok(TC_ACT_OK);
+    // Parse IPv6 header.
+    let ipv6hdr: *const Ipv6Hdr = unsafe { ptr_at(ctx, EthHdr::LEN)? };
+
+    // Extension headers: if next_hdr is not directly TCP or UDP, we cannot
+    // safely walk the header chain to find and update the L4 checksum.
+    // Pass the packet through unmodified to avoid silent corruption.
+    // (Walking the extension header chain is a v2 item.)
+    let nexthdr = unsafe { (*ipv6hdr).next_hdr };
+    match nexthdr {
+        IpProto::Tcp | IpProto::Udp => {}
+        _ => {
+            // Extension headers (e.g. Fragment=44, Routing=43, Hop-by-Hop=0): we cannot
+            // walk the chain to locate the L4 header, so we pass the packet through
+            // unmodified to avoid silent corruption. NAT is not applied to these packets.
+            // Walking the extension header chain is a v2 item.
+            info!(
+                ctx,
+                "tc_ingress: extension header passthrough, nexthdr={}", nexthdr as u8
+            );
+            return Ok(TC_ACT_OK);
+        }
     }
 
-    // Read destination IPv6 address (16 bytes at offset 24 in IPv6 header)
-    let mut dst_ipv6 = [0u8; 16];
-    for i in 0..16 {
-        dst_ipv6[i] = ctx.load::<u8>(IPV6_DST_OFFSET + i).map_err(|_| ())?;
-    }
+    // Read destination IPv6 address.
+    let dst_ipv6: [u8; 16] = unsafe { (*ipv6hdr).dst_addr };
 
     // Check prefix: fd00:abcd::/32
     if dst_ipv6[0] != SYNTHETIC_PREFIX[0]
@@ -93,10 +149,10 @@ fn try_tc_ingress(ctx: &mut TcContext) -> Result<i32, ()> {
         return Ok(TC_ACT_OK);
     }
 
-    // Extract domain_id from bytes [4..8]
+    // Extract domain_id from bytes [4..8] of the destination address.
     let domain_id = u32::from_be_bytes([dst_ipv6[4], dst_ipv6[5], dst_ipv6[6], dst_ipv6[7]]);
 
-    // Look up the real origin IPv6 from NAT_MAP
+    // Look up the real origin IPv6 from NAT_MAP.
     let nat_entry = unsafe { NAT_MAP.get(&domain_id) };
     let nat_entry = match nat_entry {
         Some(e) => e,
@@ -106,22 +162,22 @@ fn try_tc_ingress(ctx: &mut TcContext) -> Result<i32, ()> {
         }
     };
 
-    // Load server config for src rewrite
-    let server_cfg = unsafe { SERVER_CONFIG.get(0) };
+    // Load server config for src rewrite.
+    let server_cfg = SERVER_CONFIG.get(0);
     let server_cfg = match server_cfg {
         Some(c) => c,
         None => return Ok(TC_ACT_SHOT),
     };
 
-    // Read the next-header field for checksum update
-    let nexthdr: u8 = ctx.load::<u8>(IPV6_NEXTHDR_OFFSET).map_err(|_| ())?;
+    // Save original src for checksum fixup (read before any stores).
+    let orig_src: [u8; 16] = unsafe { (*ipv6hdr).src_addr };
 
-    // Save original src/dst for checksum fixup
-    let mut orig_src = [0u8; 16];
-    for i in 0..16 {
-        orig_src[i] = ctx.load::<u8>(IPV6_SRC_OFFSET + i).map_err(|_| ())?;
-    }
-    let orig_dst = dst_ipv6;
+    // L4 checksum offset (nexthdr is guaranteed TCP or UDP here).
+    let l4_base = EthHdr::LEN + Ipv6Hdr::LEN;
+    let csum_offset = match nexthdr {
+        IpProto::Tcp => l4_base + 16,
+        _ => l4_base + 6, // UDP
+    };
 
     // Rewrite dst → origin IPv6
     for i in 0..16 {
@@ -135,21 +191,9 @@ fn try_tc_ingress(ctx: &mut TcContext) -> Result<i32, ()> {
             .map_err(|_| ())?;
     }
 
-    // Incremental L4 checksum update for TCP/UDP
-    if nexthdr == IPPROTO_TCP || nexthdr == IPPROTO_UDP {
-        update_l4_csum_ipv6(
-            ctx,
-            nexthdr,
-            &AddrChange {
-                old: orig_src,
-                new: server_cfg.server_pub_ipv6,
-            },
-            &AddrChange {
-                old: orig_dst,
-                new: nat_entry.origin_ipv6,
-            },
-        )?;
-    }
+    // Incremental L4 checksum updates.
+    update_addr_csum(ctx, csum_offset, &orig_src, &server_cfg.server_pub_ipv6)?;
+    update_addr_csum(ctx, csum_offset, &dst_ipv6, &nat_entry.origin_ipv6)?;
 
     Ok(TC_ACT_OK)
 }
@@ -172,44 +216,53 @@ pub fn tc_egress(mut ctx: TcContext) -> i32 {
 }
 
 fn try_tc_egress(ctx: &mut TcContext) -> Result<i32, ()> {
-    let data_end = ctx.data_end();
-    let data = ctx.data();
-    if data + ETH_HDR_LEN + IPV6_HDR_LEN > data_end {
+    // Parse Ethernet header.
+    let ethhdr: *const EthHdr = unsafe { ptr_at(ctx, 0)? };
+    if unsafe { (*ethhdr).ether_type() } != Ok(EtherType::Ipv6) {
         return Ok(TC_ACT_OK);
     }
 
-    // Check EtherType == IPv6
-    let ethertype: u16 = ctx.load::<u16>(12).map_err(|_| ())?;
-    let ethertype_be = u16::from_be(ethertype);
-    if ethertype_be != ETH_P_IPV6 {
-        return Ok(TC_ACT_OK);
-    }
+    // Parse IPv6 header.
+    let ipv6hdr: *const Ipv6Hdr = unsafe { ptr_at(ctx, EthHdr::LEN)? };
 
-    // Read source IPv6 address
-    let mut src_ipv6 = [0u8; 16];
-    for i in 0..16 {
-        src_ipv6[i] = ctx.load::<u8>(IPV6_SRC_OFFSET + i).map_err(|_| ())?;
-    }
+    // Read source IPv6 address.
+    let src_ipv6: [u8; 16] = unsafe { (*ipv6hdr).src_addr };
 
-    // Look up in REVERSE_MAP by origin src IP
+    // Look up in REVERSE_MAP by origin src IP.
     let rev_entry = unsafe { REVERSE_MAP.get(&src_ipv6) };
     let rev_entry = match rev_entry {
         Some(e) => e,
         None => return Ok(TC_ACT_OK), // not a tracked origin, pass through
     };
 
-    // Read nexthdr for checksum update
-    let nexthdr: u8 = ctx.load::<u8>(IPV6_NEXTHDR_OFFSET).map_err(|_| ())?;
-
-    // Save original dst
-    let mut orig_dst = [0u8; 16];
-    for i in 0..16 {
-        orig_dst[i] = ctx.load::<u8>(IPV6_DST_OFFSET + i).map_err(|_| ())?;
+    // Extension headers: pass through to avoid corruption.
+    // (Walking the extension header chain is a v2 item.)
+    let nexthdr = unsafe { (*ipv6hdr).next_hdr };
+    match nexthdr {
+        IpProto::Tcp | IpProto::Udp => {}
+        _ => {
+            // Extension headers: pass through unmodified — NAT is not applied.
+            // Walking the extension header chain is a v2 item.
+            info!(
+                ctx,
+                "tc_egress: extension header passthrough, nexthdr={}", nexthdr as u8
+            );
+            return Ok(TC_ACT_OK);
+        }
     }
-    let orig_src = src_ipv6;
 
-    // Build synthetic IPv6 from domain_id
+    // Save original dst for checksum fixup (read before any stores).
+    let orig_dst: [u8; 16] = unsafe { (*ipv6hdr).dst_addr };
+
+    // Build synthetic IPv6 from domain_id.
     let synthetic = common::synthetic_ipv6(rev_entry.domain_id);
+
+    // L4 checksum offset (nexthdr is guaranteed TCP or UDP here).
+    let l4_base = EthHdr::LEN + Ipv6Hdr::LEN;
+    let csum_offset = match nexthdr {
+        IpProto::Tcp => l4_base + 16,
+        _ => l4_base + 6, // UDP
+    };
 
     // Rewrite src → synthetic address
     for i in 0..16 {
@@ -223,98 +276,11 @@ fn try_tc_egress(ctx: &mut TcContext) -> Result<i32, ()> {
             .map_err(|_| ())?;
     }
 
-    // Incremental L4 checksum update
-    if nexthdr == IPPROTO_TCP || nexthdr == IPPROTO_UDP {
-        update_l4_csum_ipv6(
-            ctx,
-            nexthdr,
-            &AddrChange {
-                old: orig_src,
-                new: synthetic,
-            },
-            &AddrChange {
-                old: orig_dst,
-                new: rev_entry.client_ipv6,
-            },
-        )?;
-    }
+    // Incremental L4 checksum updates.
+    update_addr_csum(ctx, csum_offset, &src_ipv6, &synthetic)?;
+    update_addr_csum(ctx, csum_offset, &orig_dst, &rev_entry.client_ipv6)?;
 
     Ok(TC_ACT_OK)
-}
-
-// ---------------------------------------------------------------------------
-// L4 checksum incremental update
-//
-// IPv6 pseudo-header includes src + dst addresses (each 16 bytes = 8 u16 words).
-// We update the checksum by subtracting old and adding new address words.
-//
-// Parameters are bundled into two structs to stay within the eBPF 5-argument
-// calling convention limit (&mut TcContext + &AddrChange + &AddrChange = 3).
-// ---------------------------------------------------------------------------
-
-struct AddrChange {
-    old: [u8; 16],
-    new: [u8; 16],
-}
-
-#[inline(always)]
-fn update_l4_csum_ipv6(
-    ctx: &mut TcContext,
-    nexthdr: u8,
-    src: &AddrChange,
-    dst: &AddrChange,
-) -> Result<(), ()> {
-    // L4 checksum offset depends on protocol
-    let l4_offset = ETH_HDR_LEN + IPV6_HDR_LEN;
-    let csum_offset = if nexthdr == IPPROTO_TCP {
-        l4_offset + 16 // TCP checksum at offset 16
-    } else {
-        l4_offset + 6 // UDP checksum at offset 6
-    };
-
-    // Process src address change (4 x u32 words)
-    for i in 0..4 {
-        let off = i * 4;
-        let old_word = u32::from_be_bytes([
-            src.old[off],
-            src.old[off + 1],
-            src.old[off + 2],
-            src.old[off + 3],
-        ]);
-        let new_word = u32::from_be_bytes([
-            src.new[off],
-            src.new[off + 1],
-            src.new[off + 2],
-            src.new[off + 3],
-        ]);
-        if old_word != new_word {
-            ctx.l4_csum_replace(csum_offset, old_word as u64, new_word as u64, 4)
-                .map_err(|_| ())?;
-        }
-    }
-
-    // Process dst address change
-    for i in 0..4 {
-        let off = i * 4;
-        let old_word = u32::from_be_bytes([
-            dst.old[off],
-            dst.old[off + 1],
-            dst.old[off + 2],
-            dst.old[off + 3],
-        ]);
-        let new_word = u32::from_be_bytes([
-            dst.new[off],
-            dst.new[off + 1],
-            dst.new[off + 2],
-            dst.new[off + 3],
-        ]);
-        if old_word != new_word {
-            ctx.l4_csum_replace(csum_offset, old_word as u64, new_word as u64, 4)
-                .map_err(|_| ())?;
-        }
-    }
-
-    Ok(())
 }
 
 #[panic_handler]
