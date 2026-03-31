@@ -22,8 +22,7 @@ impl DnsHandler {
 
     /// Handle a raw DNS query packet and return a raw response packet.
     pub async fn handle_query(&self, data: &[u8]) -> Result<Vec<u8>> {
-        let request =
-            Message::from_vec(data).context("failed to parse DNS query")?;
+        let request = Message::from_vec(data).context("failed to parse DNS query")?;
 
         let mut response = Message::new();
         response.set_id(request.id());
@@ -71,7 +70,9 @@ impl DnsHandler {
         // 1. Check database for existing mapping
         if let Some(row) = self.db.find_by_domain(&domain_str).await? {
             info!("Cache hit for {domain_str} → {}", row.synthetic_ipv6);
-            let synthetic: Ipv6Addr = row.synthetic_ipv6.parse()
+            let synthetic: Ipv6Addr = row
+                .synthetic_ipv6
+                .parse()
                 .context("invalid synthetic IPv6 in DB")?;
             let ttl = row.ttl_seconds.unwrap_or(300) as u32;
             let mut record = Record::from_rdata(name.clone(), ttl, RData::AAAA(AAAA(synthetic)));

@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
-use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
+use sqlx::postgres::PgPoolOptions;
 
 pub type DbPool = PgPool;
 
@@ -50,13 +50,15 @@ impl DbOps for PgPool {
         .await
         .context("failed to query domains table")?;
 
-        Ok(row.map(|(domain_id, domain, origin_ipv6, synthetic_ipv6, ttl_seconds)| DomainRow {
-            domain_id,
-            domain,
-            origin_ipv6,
-            synthetic_ipv6,
-            ttl_seconds,
-        }))
+        Ok(row.map(
+            |(domain_id, domain, origin_ipv6, synthetic_ipv6, ttl_seconds)| DomainRow {
+                domain_id,
+                domain,
+                origin_ipv6,
+                synthetic_ipv6,
+                ttl_seconds,
+            },
+        ))
     }
 
     async fn insert_domain(
@@ -90,12 +92,10 @@ impl DbOps for PgPool {
     }
 
     async fn next_domain_id(&self) -> Result<i32> {
-        let row: (i64,) = sqlx::query_as(
-            r#"SELECT nextval('domain_id_seq')"#,
-        )
-        .fetch_one(self)
-        .await
-        .context("failed to get next domain_id from sequence")?;
+        let row: (i64,) = sqlx::query_as(r#"SELECT nextval('domain_id_seq')"#)
+            .fetch_one(self)
+            .await
+            .context("failed to get next domain_id from sequence")?;
 
         Ok(row.0 as i32)
     }
