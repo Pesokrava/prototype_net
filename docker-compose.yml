@@ -22,6 +22,8 @@ services:
     environment:
       DNS_SERVER: ${SERVER_VM_IP}
       SERVER_IP: ${SERVER_VM_IP}
+    volumes:
+      - ./certs/output:/certs:ro
     restart: unless-stopped
 
 volumes:

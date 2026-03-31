@@ -1,0 +1,131 @@
+# =============================================================================
+# dev/build-vm.yaml — Lima VM for building prototype_net Linux x86_64 binaries
+#
+# Native ARM64 Ubuntu 24.04 VM (Apple Virtualization.framework).
+# Rosetta binfmt lets the VM run x86_64 binaries transparently.
+# The Rust toolchain cross-compiles daemon + dns-server to x86_64-unknown-linux-gnu.
+# bpf-linker runs natively on Linux ARM64 with no LLVM version issues.
+#
+# Source code is mounted from macOS via VirtioFS — edit on macOS, build here.
+# Build artifacts are written to a VM-local directory to avoid VirtioFS overhead.
+# The final binaries are copied back to the repo's target/ on the macOS mount.
+#
+# Usage (via Makefile):
+#   make dev-up       — create + start VM (first run: ~3-5 min)
+#   make dev-shell    — open a shell inside the VM
+#   make dev-build    — build eBPF + daemon + dns-server, copy to target/release/
+#   make dev-down     — stop VM (disk state preserved)
+#   make dev-destroy  — stop + permanently delete the VM
+#
+# Direct limactl usage:
+#   limactl start dev/build-vm.yaml --name=prototype-net-build
+#   limactl shell prototype-net-build
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# VM engine — Apple Virtualization.framework, native ARM64 on Apple Silicon.
+# ---------------------------------------------------------------------------
+vmType: "vz"
+
+# ---------------------------------------------------------------------------
+# Mount type — VirtioFS for near-native filesystem performance.
+# ---------------------------------------------------------------------------
+mountType: "virtiofs"
+
+# ---------------------------------------------------------------------------
+# Resources
+# ---------------------------------------------------------------------------
+cpus: 4
+memory: "6GiB"
+disk: "30GiB"
+
+# ---------------------------------------------------------------------------
+# OS image — Ubuntu 24.04 LTS, ARM64 (native for Apple Silicon).
+# ---------------------------------------------------------------------------
+images:
+  - location: "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-arm64.img"
+    arch: "aarch64"
+
+# ---------------------------------------------------------------------------
+# Mounts — expose the macOS home directory inside the VM at the same absolute
+# path. writable: true lets the build script copy binaries back to macOS.
+# ---------------------------------------------------------------------------
+mounts:
+  - location: "~"
+    writable: true
+
+# ---------------------------------------------------------------------------
+# SSH — enable agent forwarding for git operations inside the VM.
+# ---------------------------------------------------------------------------
+ssh:
+  forwardAgent: true
+
+# ---------------------------------------------------------------------------
+# Rosetta — transparent x86_64 binary execution via binfmt. Allows running
+# the compiled x86_64 binaries inside the VM for quick smoke-testing.
+# ---------------------------------------------------------------------------
+vmOpts:
+  vz:
+    rosetta:
+      enabled: true
+      binfmt: true
+
+# ---------------------------------------------------------------------------
+# Provisioning — install Rust toolchains + cross-linker on first boot.
+# ---------------------------------------------------------------------------
+provision:
+  - mode: system
+    script: |
+      #!/bin/bash
+      set -euo pipefail
+      export DEBIAN_FRONTEND=noninteractive
+
+      apt-get update -qq
+      apt-get install -y --no-install-recommends \
+        build-essential \
+        pkg-config \
+        libssl-dev \
+        curl \
+        git \
+        ca-certificates \
+        gcc-x86-64-linux-gnu \
+        libc6-dev-amd64-cross
+
+      echo "==> System packages installed (including x86_64 cross-linker)."
+
+  - mode: user
+    script: |
+      #!/bin/bash
+      set -euo pipefail
+
+      # Install Rust via rustup
+      if ! command -v rustup &>/dev/null; then
+        echo "==> Installing rustup..."
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+          | sh -s -- -y --profile minimal --no-modify-path
+      fi
+
+      source "$HOME/.cargo/env"
+
+      # Toolchains
+      rustup toolchain install stable  --profile minimal
+      rustup toolchain install nightly --profile minimal --component rust-src
+      rustup default stable
+
+      # Cross-compile target: the server VM runs Linux x86_64
+      rustup target add x86_64-unknown-linux-gnu
+
+      # bpf-linker: works out of the box on native Linux ARM64
+      echo "==> Installing bpf-linker..."
+      cargo install bpf-linker
+
+      # Configure Cargo to use the cross-linker for x86_64
+      mkdir -p "$HOME/.cargo"
+      printf '\n[target.x86_64-unknown-linux-gnu]\nlinker = "x86_64-linux-gnu-gcc"\n' \
+        >> "$HOME/.cargo/config.toml"
+
+      echo ""
+      echo "==> Build VM ready."
+      echo "    Rust:       $(rustc --version)"
+      echo "    bpf-linker: $(bpf-linker --version 2>/dev/null || echo installed)"
+      echo "    x86_64 cross-linker: $(x86_64-linux-gnu-gcc --version | head -1)"
