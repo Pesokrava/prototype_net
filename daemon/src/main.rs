@@ -55,15 +55,18 @@ async fn main() -> Result<()> {
 
     // Spawn LISTEN/NOTIFY handler
     let bpf_maps = maps::BpfMaps::from_ebpf(&mut bpf)?;
-    let db_listener_handle = {
+    let db_listener_handle = tokio::spawn({
         let db_url = database_url.clone();
         let maps = bpf_maps.clone();
-        tokio::spawn(async move {
+        async move {
             if let Err(e) = db::listen_for_changes(&db_url, maps, client_ipv6).await {
-                tracing::error!("DB listener error: {e}");
+                // listen_for_changes only returns Err on a fatal startup condition
+                // (pool creation failure). Panic so the process exits visibly rather
+                // than running silently deaf to all domain changes.
+                panic!("DB listener fatal error: {e}");
             }
-        })
-    };
+        }
+    });
 
     // Spawn periodic re-resolver
     let resolver_handle = {
