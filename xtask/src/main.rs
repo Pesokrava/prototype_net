@@ -1,19 +1,27 @@
 use std::process::Command;
 
 use anyhow::{bail, Context, Result};
+use clap::{Parser, Subcommand};
+
+/// Workspace automation tasks, invoked via `cargo xtask`.
+#[derive(Parser)]
+#[command(name = "cargo xtask", version, about)]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Build the eBPF program with the nightly toolchain.
+    BuildEbpf,
+}
 
 fn main() -> Result<()> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    match args.first().map(|s| s.as_str()) {
-        Some("build-ebpf") => build_ebpf(),
-        Some(cmd) => bail!("unknown xtask command: {cmd}"),
-        None => {
-            eprintln!("Usage: cargo xtask <COMMAND>");
-            eprintln!();
-            eprintln!("Commands:");
-            eprintln!("  build-ebpf    Build the eBPF program with nightly toolchain");
-            Ok(())
-        }
+    let cli = Cli::parse();
+
+    match cli.command {
+        Commands::BuildEbpf => build_ebpf(),
     }
 }
 
