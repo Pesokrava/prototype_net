@@ -6,8 +6,8 @@ eBPF-based IPv6 NAT66 transparent proxy using synthetic DNS addresses, strongSwa
 
 ```
 Physical Linux Host
-├── docker-compose.yml        — Postgres 16 + test client container
-│     ├── postgres:16         — port 5432, accessible at 192.168.122.1:5432 from VM
+├── docker-compose.yml        — Postgres 18 + test client container
+│     ├── postgres:18         — port 5432, accessible at 192.168.122.1:5432 from VM
 │     └── test-client         — Ubuntu 24.04, strongSwan, curl
 │
 └── libvirt/KVM (virbr0 bridge, host IP 192.168.122.1)

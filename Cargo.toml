@@ -1,10 +1,11 @@
 [workspace]
 resolver = "2"
 members = [
-    "common",
-    "daemon",
-    "dns-server",
-    "xtask",
+  "common",
+  "daemon",
+  "dns-server",
+  "ebpf",
+  "xtask",
 ]
 
 # ebpf crate is excluded — it uses nightly + bpfel-unknown-none target
