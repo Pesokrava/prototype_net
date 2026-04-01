@@ -1,0 +1,21 @@
+# ansible/vars.yml
+#
+# Runtime variables for the prototype_net server VM.
+# The Makefile's vm-provision target overrides all values from TF_VAR_* env
+# vars sourced from .env — this file is the fallback and documents what each
+# variable means. Do not hardcode machine-specific values here.
+
+# IPv4 address of the hypervisor host reachable from inside the VM (the bridge IP).
+# Find it with: ip addr show <bridge>  on the hypervisor.
+# Must NOT be empty — an incorrect value will silently break the Postgres connection.
+host_bridge_ip: ""
+
+# Postgres password — must match POSTGRES_PASSWORD in .env / docker-compose.
+postgres_password: ""
+
+# Server VM's public IPv6 address — used as NAT source by the eBPF daemon.
+# Set after first boot: ssh ubuntu@<VM_IP> ip -6 addr show scope global
+server_ipv6: ""
+
+# IP address the DNS server binds to inside the VM.
+dns_listen_addr: "0.0.0.0"

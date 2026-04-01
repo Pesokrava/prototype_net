@@ -1,0 +1,9 @@
+---
+# ansible/roles/prototype_net/handlers/main.yml
+
+- name: Apply sysctl
+  command: sysctl --system
+
+- name: Reload systemd
+  systemd:
+    daemon_reload: true

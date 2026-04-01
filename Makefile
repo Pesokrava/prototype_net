@@ -46,6 +46,12 @@ TERRAFORM_DIR   = terraform
 SSH             = ssh -o StrictHostKeyChecking=no ubuntu@$(VM_IP)
 SCP             = scp -o StrictHostKeyChecking=no
 
+# Homeserver (where libvirt/KVM runs)
+HOMESERVER   = homeserver
+REMOTE_DIR   = /home/peso/prototype_net
+REMOTE_SSH   = ssh $(HOMESERVER)
+REMOTE_VIRSH = $(REMOTE_SSH) virsh -c qemu:///system
+
 # Lima build VM
 DEV_VM_NAME     = prototype-net-build
 DEV_VM_YAML     = dev/build-vm.yaml
@@ -58,10 +64,10 @@ LIMA            = limactl shell $(DEV_VM_NAME)
 
 .PHONY: help dev-up dev-shell dev-build dev-build-ebpf dev-down dev-destroy \
         certs \
-        vm-up vm-ip vm-down vm-ssh \
+        vm-up vm-provision vm-ip vm-down vm-ssh \
         postgres-up postgres-down \
         deploy deploy-bins deploy-certs \
-        client-up client-down \
+        client-up client-up-mac client-down \
         test status logs-daemon logs-dns \
         clean clean-certs clean-all
 
@@ -86,6 +92,7 @@ help:
 	@echo ""
 	@echo "  Server VM  (Linux host, via SSH/Terraform)"
 	@echo "    vm-up          Provision server VM with Terraform"
+	@echo "    vm-provision   Run Ansible to install packages + services on VM"
 	@echo "    vm-ip          Print the VM IP"
 	@echo "    vm-ssh         Open SSH session to server VM"
 	@echo "    vm-down        Destroy the server VM"
@@ -101,6 +108,7 @@ help:
 	@echo ""
 	@echo "  Test"
 	@echo "    client-up      Start the test client container"
+	@echo "    client-up-mac  Start the test client container (macOS, no local Postgres)"
 	@echo "    client-down    Stop the test client container"
 	@echo "    test           Run end-to-end curl tests"
 	@echo ""
@@ -173,20 +181,77 @@ certs:
 # ---------------------------------------------------------------------------
 
 vm-up:
-	@echo "==> Provisioning server VM with Terraform..."
-	cd $(TERRAFORM_DIR) && terraform init && terraform apply
+	$(call require,TF_VAR_vm_bridge_name)
+	$(call require,TF_VAR_ssh_public_key)
+	@# Guard: ensure the SSH key in .env matches the key currently in the agent.
+	@# A mismatch means the VM will boot with the wrong key and SSH will be denied.
+	@AGENT_KEY=$$(ssh-add -L 2>/dev/null | head -1); \
+	if [ -z "$$AGENT_KEY" ]; then \
+		echo "ERROR: SSH agent has no keys loaded."; \
+		echo "  Run: ssh-add ~/.ssh/id_ed25519  (or equivalent)"; \
+		exit 1; \
+	fi; \
+	ENV_KEY="$(TF_VAR_ssh_public_key)"; \
+	if [ "$$AGENT_KEY" != "$$ENV_KEY" ]; then \
+		echo "ERROR: TF_VAR_ssh_public_key in .env does not match the SSH agent key."; \
+		echo "  Agent key: $$AGENT_KEY"; \
+		echo "  Update TF_VAR_ssh_public_key in .env to the value above."; \
+		exit 1; \
+	fi
+	@echo "==> Syncing terraform config to homeserver..."
+	rsync -a terraform/ $(HOMESERVER):$(REMOTE_DIR)/terraform/
+	@echo "==> Applying Terraform on homeserver..."
+	$(REMOTE_SSH) "cd $(REMOTE_DIR)/terraform && set -a && . $(REMOTE_DIR)/.env && set +a && terraform init -upgrade -input=false >/dev/null && terraform apply -auto-approve -input=false"
+	@echo "==> Starting VM..."
+	$(REMOTE_VIRSH) start prototype-net-server 2>/dev/null || true
+	@echo "==> Waiting for SSH and IPv4 DHCP on VM..."
+	@BRIDGE=$(TF_VAR_vm_bridge_name); \
+	MAC=$$($(REMOTE_VIRSH) domiflist prototype-net-server 2>/dev/null | awk '/bridge/{print $$5}'); \
+	LL="fe80::$$(echo $$MAC | awk -F: '{printf "%02x%02x:%02x%02x:%02x%02x\n", \
+		xor(strtonum("0x"$$1),2), strtonum("0x"$$2), \
+		strtonum("0x"$$3), 0xff, 0xfe, \
+		strtonum("0x"$$4), strtonum("0x"$$5), strtonum("0x"$$6)}')"; \
+	IP=""; \
+	for i in $$(seq 1 24); do \
+		IP=$$($(REMOTE_SSH) "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=3 -o BatchMode=yes ubuntu@$$LL%$$BRIDGE 'ip -4 addr show scope global | grep inet' 2>/dev/null | awk '{print \$$2}' | cut -d/ -f1"); \
+		if [ -n "$$IP" ]; then break; fi; \
+		printf "."; sleep 5; \
+	done; \
+	echo ""; \
+	if [ -z "$$IP" ]; then \
+		echo "ERROR: VM did not get a DHCP IPv4 address after 2 minutes."; \
+		exit 1; \
+	fi; \
+	echo "==> VM IP: $$IP"; \
+	echo "  To save: echo SERVER_VM_IP=$$IP >> .env"
+	@echo "Next: set SERVER_VM_IP in .env, then run: make vm-provision"
+
+vm-provision:
+	$(call require,SERVER_VM_IP)
+	@echo "==> Waiting for SSH on $(SERVER_VM_IP)..."
+	@until ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -o BatchMode=yes ubuntu@$(SERVER_VM_IP) true 2>/dev/null; do \
+		echo "  SSH not ready yet, retrying in 5s..."; sleep 5; \
+	done
+	@echo "==> Running Ansible provisioning..."
+	ansible-playbook \
+		-i "$(SERVER_VM_IP)," \
+		-u ubuntu \
+		-e @ansible/vars.yml \
+		-e postgres_password=$(TF_VAR_postgres_password) \
+		-e host_bridge_ip=$(TF_VAR_host_bridge_ip) \
+		-e server_ipv6=$(TF_VAR_server_ipv6) \
+		-e dns_listen_addr=$(TF_VAR_dns_listen_addr) \
+		ansible/site.yml
 	@echo ""
-	@echo "==> VM IP:"
-	@cd $(TERRAFORM_DIR) && terraform output vm_ip
-	@echo ""
-	@echo "Next steps:"
-	@echo "  1. Set SERVER_VM_IP in .env to the IP above"
-	@echo "  2. Set SERVER_IPV6 in .env (check: ssh ubuntu@<VM_IP> ip -6 addr show)"
-	@echo "  3. Wait ~2 min for cloud-init, then: make deploy"
+	@echo "==> VM provisioned. Next: make certs && make dev-build && make deploy"
 
 vm-ip:
-	$(call require,TERRAFORM_DIR)
-	@cd $(TERRAFORM_DIR) && terraform output vm_ip
+	@BRIDGE=$(TF_VAR_vm_bridge_name); \
+	MAC=$$($(REMOTE_VIRSH) domiflist prototype-net-server 2>/dev/null | awk '/bridge/{print $$5}'); \
+	if [ -z "$$MAC" ]; then echo "ERROR: VM not found or not running." && exit 1; fi; \
+	LL=$$($(REMOTE_SSH) "ip neigh show dev $$BRIDGE | grep -i '$$MAC' | awk '{print \$$1}'"); \
+	if [ -z "$$LL" ]; then echo "ERROR: VM not visible on $$BRIDGE yet." && exit 1; fi; \
+	$(REMOTE_SSH) "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -o BatchMode=yes ubuntu@$$LL%$$BRIDGE 'ip -4 addr show scope global | grep inet | awk \"{print \\\$$2}\" | cut -d/ -f1' 2>/dev/null"
 
 vm-ssh:
 	$(call require,SERVER_VM_IP)
@@ -194,7 +259,14 @@ vm-ssh:
 
 vm-down:
 	@echo "==> Destroying server VM..."
-	cd $(TERRAFORM_DIR) && terraform destroy
+	$(REMOTE_SSH) "cd $(REMOTE_DIR)/terraform && set -a && . $(REMOTE_DIR)/.env && set +a && terraform destroy -auto-approve -input=false"
+	@echo "==> Wiping overlay disk (ensures clean cloud-init on next vm-up)..."
+	$(REMOTE_VIRSH) vol-delete prototype-net-server-disk.qcow2 --pool default 2>/dev/null || true
+	$(REMOTE_VIRSH) vol-create-as default prototype-net-server-disk.qcow2 21474836480 \
+		--format qcow2 \
+		--backing-vol prototype-net-server-ubuntu-base.qcow2 \
+		--backing-vol-format qcow2
+	@echo "==> Done. Run 'make vm-up' to provision a fresh VM."
 
 # ---------------------------------------------------------------------------
 # Postgres
@@ -260,9 +332,21 @@ deploy-certs:
 
 client-up:
 	$(call require,SERVER_VM_IP)
-	$(call require,POSTGRES_PASSWORD)
 	@test -f $(CERT_DIR)/client.crt || (echo "ERROR: client certs not found — run: make certs" && exit 1)
 	@echo "==> Starting test client..."
+	docker compose up -d client
+	@echo "==> Waiting for tunnel to establish..."
+	@for i in $$(seq 1 30); do \
+		docker compose exec client swanctl --list-sas 2>/dev/null | grep -q ESTABLISHED && \
+			echo "  Tunnel established!" && break; \
+		echo "  waiting for tunnel... ($$i/30)"; \
+		sleep 2; \
+	done
+
+client-up-mac:
+	$(call require,SERVER_VM_IP)
+	@test -f $(CERT_DIR)/client.crt || (echo "ERROR: client certs not found — run: make certs" && exit 1)
+	@echo "==> Starting test client (macOS)..."
 	docker compose up -d client
 	@echo "==> Waiting for tunnel to establish..."
 	@for i in $$(seq 1 30); do \

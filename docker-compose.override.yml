@@ -1,0 +1,3 @@
+services:
+  client:
+    depends_on: {}

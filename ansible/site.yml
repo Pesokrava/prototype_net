@@ -1,0 +1,20 @@
+---
+# ansible/site.yml
+# Provisions the prototype_net server VM.
+# Run after `make vm-up` once the VM has an IP and SSH is up.
+#
+# Usage (via Makefile):
+#   make vm-provision
+#
+# Direct usage:
+#   ansible-playbook -i "192.168.100.X," -u ubuntu ansible/site.yml \
+#     -e @ansible/vars.yml \
+#     -e postgres_password=secret
+
+- name: Provision prototype_net server
+  hosts: all
+  become: true
+  vars_files:
+    - vars.yml
+  roles:
+    - prototype_net

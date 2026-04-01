@@ -1,110 +1,21 @@
 #cloud-config
-package_update: true
-package_upgrade: true
+users:
+  - name: ubuntu
+    groups: [sudo, adm]
+    shell: /bin/bash
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    lock_passwd: false
+    ssh_authorized_keys:
+      - ${ssh_public_key}
 
-packages:
-  - strongswan
-  - strongswan-swanctl
-  - libcharon-extra-plugins
-  - linux-tools-generic
-  - bpftool
-  - curl
-  - iproute2
-  - net-tools
-
-# Enable IPv6 forwarding
+# Drop the networkd-wait-online timeout override before first boot.
+# write_files runs during cloud-init-local — the very first stage — before
+# systemd can block on networkd-wait-online and freeze the boot.
 write_files:
-  # sysctl for IPv6 forwarding
-  - path: /etc/sysctl.d/99-prototype-net.conf
+  - path: /etc/systemd/system/systemd-networkd-wait-online.service.d/timeout.conf
+    permissions: '0644'
     content: |
-      net.ipv6.conf.all.forwarding=1
-      net.ipv6.conf.default.forwarding=1
-
-  # strongSwan server config
-  - path: /etc/swanctl/conf.d/prototype.conf
-    content: |
-      connections {
-          prototype {
-              version = 2
-              proposals = aes256-sha256-ecp384
-              rekey_time = 4h
-              local {
-                  auth = pubkey
-                  certs = server.crt
-                  id = %any
-              }
-              remote {
-                  auth = pubkey
-                  cacerts = ca.crt
-              }
-              children {
-                  prototype {
-                      esp_proposals = aes256gcm128
-                      local_ts = ::/0
-                      remote_ts = fd00:abcd::/32
-                      mode = tunnel
-                      start_action = none
-                      dpd_action = clear
-                  }
-              }
-          }
-      }
-
-  # Daemon systemd unit
-  - path: /etc/systemd/system/prototype-daemon.service
-    content: |
-      [Unit]
-      Description=prototype_net eBPF daemon
-      After=network-online.target strongswan.service
-      Wants=network-online.target
-
       [Service]
-      Type=simple
-      ExecStart=/opt/prototype_net/daemon
-      Environment=DATABASE_URL=postgres://prototype:${postgres_password}@${host_bridge_ip}:5432/prototype_net
-      Environment=INTERFACE_NAME=xfrm0
-      Environment=SERVER_IPV6=${server_ipv6}
-      Restart=on-failure
-      RestartSec=5
-
-      [Install]
-      WantedBy=multi-user.target
-
-  # DNS server systemd unit
-  - path: /etc/systemd/system/prototype-dns-server.service
-    content: |
-      [Unit]
-      Description=prototype_net DNS server
-      After=network-online.target
-      Wants=network-online.target
-
-      [Service]
-      Type=simple
-      ExecStart=/opt/prototype_net/dns-server
-      Environment=DATABASE_URL=postgres://prototype:${postgres_password}@${host_bridge_ip}:5432/prototype_net
-      Environment=LISTEN_ADDR=${dns_listen_addr}:53
-      Restart=on-failure
-      RestartSec=5
-      AmbientCapabilities=CAP_NET_BIND_SERVICE
-
-      [Install]
-      WantedBy=multi-user.target
-
-runcmd:
-  # Apply sysctl settings
-  - sysctl --system
-
-  # Create binary directory
-  - mkdir -p /opt/prototype_net
-
-  # Note: Binaries (daemon, dns-server) must be SCP'd to /opt/prototype_net/ after VM creation
-  # Certificates must be installed to /etc/swanctl/{x509,x509ca,private}/
-
-  # Enable services (they will fail until binaries + certs are deployed)
-  - systemctl daemon-reload
-  - systemctl enable strongswan-starter.service
-  - systemctl enable prototype-daemon.service
-  - systemctl enable prototype-dns-server.service
-
-  # Start strongSwan (will work once certs are installed)
-  - systemctl start strongswan-starter.service || true
+      TimeoutStartSec=5
+      ExecStart=
+      ExecStart=/lib/systemd/systemd-networkd-wait-online --timeout=5

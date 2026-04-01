@@ -1,9 +1,14 @@
 output "vm_ip" {
-  description = "IPv4 address of the server VM (assigned by libvirt DHCP)"
-  value       = libvirt_domain.server.network_interface[0].addresses[0]
+  description = "IPv4 address of the server VM — run: virsh domifaddr $(terraform output -raw vm_name)"
+  value       = "run: virsh domifaddr ${libvirt_domain.server.name}"
+}
+
+output "vm_name" {
+  description = "Libvirt domain name"
+  value       = libvirt_domain.server.name
 }
 
 output "ssh_command" {
-  description = "SSH command to connect to the server VM"
-  value       = "ssh ubuntu@${libvirt_domain.server.network_interface[0].addresses[0]}"
+  description = "SSH command template — replace <IP> with the address from 'virsh domifaddr'"
+  value       = "ssh ubuntu@$(virsh domifaddr ${libvirt_domain.server.name} | awk '/ipv4/{print $4}' | cut -d/ -f1)"
 }

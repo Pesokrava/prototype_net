@@ -1,0 +1,173 @@
+---
+# ansible/roles/prototype_net/tasks/main.yml
+
+# ---------------------------------------------------------------------------
+# Packages
+# ---------------------------------------------------------------------------
+
+- name: Update apt cache
+  apt:
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Install required packages
+  apt:
+    name:
+      - strongswan
+      - strongswan-swanctl
+      - strongswan-charon
+      - libcharon-extra-plugins
+      - linux-tools-generic   # provides bpftool
+      - curl
+      - iproute2
+      - net-tools
+    state: present
+
+# ---------------------------------------------------------------------------
+# sysctl — IPv6 forwarding
+# ---------------------------------------------------------------------------
+
+- name: Configure sysctl for IPv6 forwarding
+  copy:
+    dest: /etc/sysctl.d/99-prototype-net.conf
+    content: |
+      net.ipv6.conf.all.forwarding=1
+      net.ipv6.conf.default.forwarding=1
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Apply sysctl
+
+# ---------------------------------------------------------------------------
+# strongSwan config
+# ---------------------------------------------------------------------------
+
+- name: Create strongSwan swanctl config directory
+  file:
+    path: /etc/swanctl/conf.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Write strongSwan IKEv2 server config
+  copy:
+    dest: /etc/swanctl/conf.d/prototype.conf
+    content: |
+      connections {
+          prototype {
+              version = 2
+              proposals = aes256-sha256-ecp384
+              rekey_time = 4h
+              local {
+                  auth = pubkey
+                  certs = server.crt
+                  id = %any
+              }
+              remote {
+                  auth = pubkey
+                  cacerts = ca.crt
+              }
+              children {
+                  prototype {
+                      esp_proposals = aes256gcm128
+                      local_ts = ::/0
+                      remote_ts = fd00:abcd::/32
+                      mode = tunnel
+                      start_action = none
+                      dpd_action = clear
+                  }
+              }
+          }
+      }
+    owner: root
+    group: root
+    mode: "0644"
+
+# ---------------------------------------------------------------------------
+# Binary directory
+# ---------------------------------------------------------------------------
+
+- name: Create binary directory
+  file:
+    path: /opt/prototype_net
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+# ---------------------------------------------------------------------------
+# Systemd units
+# ---------------------------------------------------------------------------
+
+- name: Write prototype-daemon systemd unit
+  copy:
+    dest: /etc/systemd/system/prototype-daemon.service
+    content: |
+      [Unit]
+      Description=prototype_net eBPF daemon
+      After=network-online.target strongswan.service
+      Wants=network-online.target
+
+      [Service]
+      Type=simple
+      ExecStart=/opt/prototype_net/daemon
+      Environment=DATABASE_URL=postgres://prototype:{{ postgres_password }}@{{ host_bridge_ip }}:5432/prototype_net
+      Environment=INTERFACE_NAME=xfrm0
+      Environment=SERVER_IPV6={{ server_ipv6 }}
+      Restart=on-failure
+      RestartSec=5
+
+      [Install]
+      WantedBy=multi-user.target
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload systemd
+
+- name: Write prototype-dns-server systemd unit
+  copy:
+    dest: /etc/systemd/system/prototype-dns-server.service
+    content: |
+      [Unit]
+      Description=prototype_net DNS server
+      After=network-online.target
+      Wants=network-online.target
+
+      [Service]
+      Type=simple
+      ExecStart=/opt/prototype_net/dns-server
+      Environment=DATABASE_URL=postgres://prototype:{{ postgres_password }}@{{ host_bridge_ip }}:5432/prototype_net
+      Environment=LISTEN_ADDR={{ dns_listen_addr }}:53
+      Restart=on-failure
+      RestartSec=5
+      AmbientCapabilities=CAP_NET_BIND_SERVICE
+
+      [Install]
+      WantedBy=multi-user.target
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload systemd
+
+# ---------------------------------------------------------------------------
+# Enable services (they start once binaries + certs are deployed)
+# ---------------------------------------------------------------------------
+
+- name: Enable strongswan service
+  systemd:
+    name: strongswan.service
+    enabled: true
+    daemon_reload: true
+
+- name: Enable prototype-daemon service
+  systemd:
+    name: prototype-daemon.service
+    enabled: true
+    daemon_reload: true
+
+- name: Enable prototype-dns-server service
+  systemd:
+    name: prototype-dns-server.service
+    enabled: true
+    daemon_reload: true

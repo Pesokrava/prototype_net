@@ -4,25 +4,19 @@ variable "vm_name" {
   default     = "prototype-net-server"
 }
 
-variable "host_bridge_ip" {
-  description = "IP address of the host on the virbr0 bridge (verify with: ip addr show virbr0)"
+variable "vm_bridge_name" {
+  description = "Host bridge interface the VM NIC attaches to (e.g. br0). Required for bridged networking. Leave empty to use vm_network_name instead."
   type        = string
-  default     = "192.168.122.1"
+  default     = ""
 }
 
-variable "postgres_password" {
-  description = "Postgres password (must match POSTGRES_PASSWORD in .env / docker-compose)"
+variable "vm_network_name" {
+  description = "Libvirt network name when not using a bridge (default libvirt NAT network). Ignored when vm_bridge_name is set."
   type        = string
-  sensitive   = true
+  default     = "default"
 }
 
-variable "server_ipv6" {
-  description = "Static IPv6 address to assign to the server VM"
+variable "ssh_public_key" {
+  description = "SSH public key injected into the ubuntu user. Must be the full public key string (from ssh-add -L), not a file path."
   type        = string
-}
-
-variable "dns_listen_addr" {
-  description = "IP address the DNS server binds to inside the VM"
-  type        = string
-  default     = "0.0.0.0"
 }

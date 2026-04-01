@@ -1,41 +1,39 @@
 # terraform/ -- Infrastructure Provisioning
 
-This directory contains Terraform configuration for provisioning the server VM on a local libvirt/KVM hypervisor. It uses cloud-init for automated VM setup.
+This directory contains Terraform configuration for provisioning the server VM on a local libvirt/KVM hypervisor. Cloud-init is minimal — only user creation and SSH key injection. All software provisioning is done by Ansible (`ansible/`).
 
 ## Resources Defined (`main.tf`)
 
 - **`libvirt_volume.ubuntu_base`** -- Downloads the Ubuntu 24.04 cloud image.
-- **`libvirt_volume.server_disk`** -- 20GB disk based on the Ubuntu image.
-- **`libvirt_cloudinit_disk.server`** -- Cloud-init ISO generated from `cloud-init/server.yaml`.
-- **`libvirt_domain.server`** -- VM definition: 2 vCPU, 2048MB RAM, virbr0 network, serial console, SPICE graphics.
+- **`libvirt_volume.server_disk`** -- 20GB qcow2 overlay disk backed by the base image.
+- **`libvirt_cloudinit_disk.server`** -- Cloud-init ISO with user+SSH key only.
+- **`libvirt_domain.server`** -- VM definition: 2 vCPU, 2048MB RAM, br0 bridge network, serial console, SPICE graphics.
 
 ## Cloud-Init (`cloud-init/server.yaml`)
 
-The cloud-init template:
-- Installs packages: strongSwan, bpftool, curl, iproute2, net-tools.
-- Configures sysctl for IPv6 forwarding.
-- Writes strongSwan IKEv2 server config.
-- Creates two systemd services: `prototype-daemon.service` and `prototype-dns-server.service`.
-- Passes configuration via env vars: `DATABASE_URL`, `INTERFACE_NAME`, `SERVER_IPV6`, `LISTEN_ADDR`.
-- Note: Binaries and certs must be SCP'd to the VM after creation.
+Intentionally minimal — only creates the `ubuntu` user with sudo and injects the SSH public key. The base image's built-in netplan config handles DHCP. All packages, sysctl, and services are managed by Ansible.
 
 ## Variables (`variables.tf`)
 
 - `vm_name` -- VM name (default: "prototype-net-server").
-- `host_bridge_ip` -- Host bridge IP for Postgres access (default: "192.168.122.1").
-- `postgres_password` -- Postgres password (sensitive).
-- `server_ipv6` -- Server's public IPv6 address.
-- `dns_listen_addr` -- DNS server bind address (default: "0.0.0.0").
+- `vm_bridge_name` -- Host bridge interface (e.g. `br0`). Leave empty to use libvirt NAT.
+- `vm_network_name` -- Libvirt network name when not using a bridge (default: "default").
+- `ssh_public_key` -- SSH public key injected into the ubuntu user.
 
-## Outputs (`outputs.tf`)
+## Workflow
 
-- `vm_ip` -- DHCP-assigned IPv4 address.
-- `ssh_command` -- Ready-to-use SSH command.
+```
+make vm-up          # Terraform: create VM
+# find IP: virsh -c qemu:///system domifaddr prototype-net-server
+# set SERVER_VM_IP in .env
+make vm-provision   # Ansible: install packages, services, sysctl
+make certs          # generate TLS certs
+make dev-build      # build binaries
+make deploy         # scp binaries + certs, restart services
+```
 
 ## Conventions
 
-- Uses `dmacvicar/libvirt` Terraform provider (v0.7+).
-- `templatefile()` for injecting variables into cloud-init YAML.
-- Sensitive variables are marked appropriately.
+- Uses `dmacvicar/libvirt` Terraform provider (~> 0.9).
+- Only `ssh_public_key` is passed as a templatefile variable — everything else goes to Ansible.
 - All variables can be set via `TF_VAR_*` environment variables.
-- The VM accesses host Postgres over the virbr0 bridge (192.168.122.1:5432).
