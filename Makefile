@@ -46,12 +46,6 @@ TERRAFORM_DIR   = terraform
 SSH             = ssh -o StrictHostKeyChecking=no ubuntu@$(VM_IP)
 SCP             = scp -o StrictHostKeyChecking=no
 
-# Homeserver (where libvirt/KVM runs)
-HOMESERVER   = homeserver
-REMOTE_DIR   = /home/peso/prototype_net
-REMOTE_SSH   = ssh $(HOMESERVER)
-REMOTE_VIRSH = $(REMOTE_SSH) virsh -c qemu:///system
-
 # Lima build VM
 DEV_VM_NAME     = prototype-net-build
 DEV_VM_YAML     = dev/build-vm.yaml
@@ -90,7 +84,7 @@ help:
 	@echo "  Certificates  (runs on macOS)"
 	@echo "    certs          Generate TLS certificates  (requires SERVER_VM_IP in .env)"
 	@echo ""
-	@echo "  Server VM  (Linux host, via SSH/Terraform)"
+	@echo "  Server VM  (Terraform from local machine)"
 	@echo "    vm-up          Provision server VM with Terraform"
 	@echo "    vm-provision   Run Ansible to install packages + services on VM"
 	@echo "    vm-ip          Print the VM IP"
@@ -181,49 +175,44 @@ certs:
 # ---------------------------------------------------------------------------
 
 vm-up:
-	$(call require,TF_VAR_vm_bridge_name)
-	$(call require,TF_VAR_ssh_public_key)
-	@# Guard: ensure the SSH key in .env matches the key currently in the agent.
-	@# A mismatch means the VM will boot with the wrong key and SSH will be denied.
-	@AGENT_KEY=$$(ssh-add -L 2>/dev/null | head -1); \
-	if [ -z "$$AGENT_KEY" ]; then \
-		echo "ERROR: SSH agent has no keys loaded."; \
-		echo "  Run: ssh-add ~/.ssh/id_ed25519  (or equivalent)"; \
+	@KEY='$(TF_VAR_ssh_public_key)'; \
+	if [ -z "$$KEY" ]; then \
+		echo "ERROR: TF_VAR_ssh_public_key is empty."; \
+		echo "Set it from your agent: ssh-add -L"; \
 		exit 1; \
 	fi; \
-	ENV_KEY="$(TF_VAR_ssh_public_key)"; \
-	if [ "$$AGENT_KEY" != "$$ENV_KEY" ]; then \
-		echo "ERROR: TF_VAR_ssh_public_key in .env does not match the SSH agent key."; \
-		echo "  Agent key: $$AGENT_KEY"; \
-		echo "  Update TF_VAR_ssh_public_key in .env to the value above."; \
+	if ! ssh-add -L 2>/dev/null | grep -Fqx -- "$$KEY"; then \
+		echo "ERROR: TF_VAR_ssh_public_key is not currently loaded in ssh-agent."; \
+		echo "This will cause SSH auth failures after boot."; \
+		echo "Fix: update TF_VAR_ssh_public_key from: ssh-add -L"; \
 		exit 1; \
 	fi
-	@echo "==> Syncing terraform config to homeserver..."
-	rsync -a terraform/ $(HOMESERVER):$(REMOTE_DIR)/terraform/
-	@echo "==> Applying Terraform on homeserver..."
-	$(REMOTE_SSH) "cd $(REMOTE_DIR)/terraform && set -a && . $(REMOTE_DIR)/.env && set +a && terraform init -upgrade -input=false >/dev/null && terraform apply -auto-approve -input=false"
-	@echo "==> Starting VM..."
-	$(REMOTE_VIRSH) start prototype-net-server 2>/dev/null || true
-	@echo "==> Waiting for SSH and IPv4 DHCP on VM..."
-	@BRIDGE=$(TF_VAR_vm_bridge_name); \
-	MAC=$$($(REMOTE_VIRSH) domiflist prototype-net-server 2>/dev/null | awk '/bridge/{print $$5}'); \
-	LL="fe80::$$(echo $$MAC | awk -F: '{printf "%02x%02x:%02x%02x:%02x%02x\n", \
-		xor(strtonum("0x"$$1),2), strtonum("0x"$$2), \
-		strtonum("0x"$$3), 0xff, 0xfe, \
-		strtonum("0x"$$4), strtonum("0x"$$5), strtonum("0x"$$6)}')"; \
-	IP=""; \
-	for i in $$(seq 1 24); do \
-		IP=$$($(REMOTE_SSH) "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=3 -o BatchMode=yes ubuntu@$$LL%$$BRIDGE 'ip -4 addr show scope global | grep inet' 2>/dev/null | awk '{print \$$2}' | cut -d/ -f1"); \
-		if [ -n "$$IP" ]; then break; fi; \
-		printf "."; sleep 5; \
-	done; \
-	echo ""; \
-	if [ -z "$$IP" ]; then \
-		echo "ERROR: VM did not get a DHCP IPv4 address after 2 minutes."; \
-		exit 1; \
-	fi; \
-	echo "==> VM IP: $$IP"; \
-	echo "  To save: echo SERVER_VM_IP=$$IP >> .env"
+	@echo "==> Applying Terraform from this machine..."
+	@echo "==> Using libvirt URI: $${TF_VAR_libvirt_uri:-qemu:///system}"
+	@cd $(TERRAFORM_DIR) && terraform init -upgrade -input=false >/dev/null && terraform apply -auto-approve -input=false
+	@URI=$${TF_VAR_libvirt_uri:-qemu:///system}; \
+	case "$$URI" in \
+		qemu:///system) \
+			echo "==> Ensuring VM is running via local libvirt..."; \
+			virsh -c qemu:///system start prototype-net-server >/dev/null 2>&1 || true; \
+			;; \
+		qemu+sshcmd://*) \
+			REMOTE=$${URI#qemu+sshcmd://}; REMOTE=$${REMOTE%%/*}; \
+			echo "==> Ensuring VM is running via SSH host '$$REMOTE'..."; \
+			ssh $$REMOTE "virsh -c qemu:///system start prototype-net-server >/dev/null 2>&1 || true"; \
+			;; \
+		qemu+ssh://*) \
+			REMOTE=$${URI#qemu+ssh://}; REMOTE=$${REMOTE%%/*}; \
+			echo "==> Ensuring VM is running via SSH target '$$REMOTE'..."; \
+			ssh $$REMOTE "virsh -c qemu:///system start prototype-net-server >/dev/null 2>&1 || true"; \
+			;; \
+		*) \
+			echo "==> Note: URI transport does not support automatic VM start from this target."; \
+			echo "==> If needed, start VM manually: virsh -c qemu:///system start prototype-net-server"; \
+			;; \
+	esac
+	@echo "==> VM created/updated. Fetch VM IP manually from your hypervisor or LAN tools."
+	@echo "==> Tip (on libvirt host): virsh -c qemu:///system domifaddr --source agent prototype-net-server"
 	@echo "Next: set SERVER_VM_IP in .env, then run: make vm-provision"
 
 vm-provision:
@@ -246,27 +235,43 @@ vm-provision:
 	@echo "==> VM provisioned. Next: make certs && make dev-build && make deploy"
 
 vm-ip:
-	@BRIDGE=$(TF_VAR_vm_bridge_name); \
-	MAC=$$($(REMOTE_VIRSH) domiflist prototype-net-server 2>/dev/null | awk '/bridge/{print $$5}'); \
-	if [ -z "$$MAC" ]; then echo "ERROR: VM not found or not running." && exit 1; fi; \
-	LL=$$($(REMOTE_SSH) "ip neigh show dev $$BRIDGE | grep -i '$$MAC' | awk '{print \$$1}'"); \
-	if [ -z "$$LL" ]; then echo "ERROR: VM not visible on $$BRIDGE yet." && exit 1; fi; \
-	$(REMOTE_SSH) "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -o BatchMode=yes ubuntu@$$LL%$$BRIDGE 'ip -4 addr show scope global | grep inet | awk \"{print \\\$$2}\" | cut -d/ -f1' 2>/dev/null"
+	@if [ "$$(uname -s)" != "Linux" ] || [ ! -S /var/run/libvirt/libvirt-sock ]; then \
+		echo "ERROR: vm-ip must be run on a Linux host with libvirt qemu:///system."; \
+		exit 1; \
+	fi
+	@IP=$$(virsh -c qemu:///system domifaddr --source agent prototype-net-server 2>/dev/null | awk '/ipv4/{print $$4}' | cut -d/ -f1 | head -n1); \
+	if [ -n "$$IP" ]; then \
+		echo "$$IP"; \
+		exit 0; \
+	fi; \
+	BRIDGE=$(TF_VAR_vm_bridge_name); \
+	MAC=$$(virsh -c qemu:///system domiflist prototype-net-server 2>/dev/null | awk '/bridge|network/{print $$5; exit}'); \
+	if [ -z "$$MAC" ]; then \
+		echo "ERROR: VM not found or no NIC attached."; \
+		exit 1; \
+	fi; \
+	if [ -n "$$BRIDGE" ]; then \
+		IP=$$(ip neigh show dev $$BRIDGE | awk -v mac="$$MAC" 'tolower($$0) ~ tolower(mac) {print $$1}' | grep -v '^fe80:' | head -n1); \
+		if [ -n "$$IP" ]; then \
+			echo "$$IP"; \
+		else \
+			echo "ERROR: no IPv4 neighbor entry for $$MAC on $$BRIDGE."; \
+			echo "Try: sudo virt-cat -a /var/lib/libvirt/images/prototype-net-server-disk.qcow2 /var/log/syslog | grep 'DHCPv4 address'"; \
+			exit 1; \
+		fi; \
+	else \
+		virsh -c qemu:///system domifaddr prototype-net-server | awk '/ipv4/{print $$4}' | cut -d/ -f1; \
+	fi
 
 vm-ssh:
 	$(call require,SERVER_VM_IP)
 	$(SSH)
 
 vm-down:
-	@echo "==> Destroying server VM..."
-	$(REMOTE_SSH) "cd $(REMOTE_DIR)/terraform && set -a && . $(REMOTE_DIR)/.env && set +a && terraform destroy -auto-approve -input=false"
-	@echo "==> Wiping overlay disk (ensures clean cloud-init on next vm-up)..."
-	$(REMOTE_VIRSH) vol-delete prototype-net-server-disk.qcow2 --pool default 2>/dev/null || true
-	$(REMOTE_VIRSH) vol-create-as default prototype-net-server-disk.qcow2 21474836480 \
-		--format qcow2 \
-		--backing-vol prototype-net-server-ubuntu-base.qcow2 \
-		--backing-vol-format qcow2
-	@echo "==> Done. Run 'make vm-up' to provision a fresh VM."
+	@echo "==> Destroying VM from this machine..."
+	@echo "==> Using libvirt URI: $${TF_VAR_libvirt_uri:-qemu:///system}"
+	@cd $(TERRAFORM_DIR) && terraform init -upgrade -input=false >/dev/null && terraform destroy -auto-approve -input=false
+	@echo "==> VM destroyed. Next run of 'make vm-up' will create a fresh VM."
 
 # ---------------------------------------------------------------------------
 # Postgres

@@ -1,6 +1,6 @@
 output "vm_ip" {
-  description = "IPv4 address of the server VM — run: virsh domifaddr $(terraform output -raw vm_name)"
-  value       = "run: virsh domifaddr ${libvirt_domain.server.name}"
+  description = "IPv4 address of the server VM — run: virsh domifaddr --source agent $(terraform output -raw vm_name)"
+  value       = "run: virsh domifaddr --source agent ${libvirt_domain.server.name}"
 }
 
 output "vm_name" {
@@ -9,6 +9,6 @@ output "vm_name" {
 }
 
 output "ssh_command" {
-  description = "SSH command template — replace <IP> with the address from 'virsh domifaddr'"
-  value       = "ssh ubuntu@$(virsh domifaddr ${libvirt_domain.server.name} | awk '/ipv4/{print $4}' | cut -d/ -f1)"
+  description = "SSH command template — replace <IP> with the address from 'virsh domifaddr --source agent'"
+  value       = "ssh ubuntu@$(virsh domifaddr --source agent ${libvirt_domain.server.name} | awk '/ipv4/{print $4}' | cut -d/ -f1)"
 }

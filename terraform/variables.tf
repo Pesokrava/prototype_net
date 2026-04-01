@@ -4,6 +4,12 @@ variable "vm_name" {
   default     = "prototype-net-server"
 }
 
+variable "libvirt_uri" {
+  description = "Libvirt connection URI (for example: qemu:///system, qemu+sshcmd://host/system, or qemu+ssh://user@host/system)"
+  type        = string
+  default     = "qemu:///system"
+}
+
 variable "vm_bridge_name" {
   description = "Host bridge interface the VM NIC attaches to (e.g. br0). Required for bridged networking. Leave empty to use vm_network_name instead."
   type        = string

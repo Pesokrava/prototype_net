@@ -4,3 +4,6 @@ certs/output/
 *.iso
 *.qcow2
 .env
+terraform/.terraform/
+.terraform.lock.hcl
+terraform/terraform.tfstate*

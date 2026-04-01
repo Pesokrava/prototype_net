@@ -9,7 +9,23 @@ terraform {
 }
 
 provider "libvirt" {
-  uri = "qemu:///system"
+  uri = var.libvirt_uri
+}
+
+locals {
+  cloudinit_network_config = <<-EOT
+    version: 2
+    ethernets:
+      enp0s3:
+        dhcp4: true
+  EOT
+
+  cloudinit_user_data = templatefile("${path.module}/cloud-init/server.yaml", {
+    ssh_public_key = var.ssh_public_key
+  })
+
+  cloudinit_hash        = substr(sha1("${local.cloudinit_network_config}\n---\n${local.cloudinit_user_data}"), 0, 12)
+  cloudinit_volume_name = "${var.vm_name}-cloudinit-${local.cloudinit_hash}.iso"
 }
 
 # ---------------------------------------------------------------------------
@@ -57,19 +73,29 @@ resource "libvirt_volume" "server_disk" {
 # ---------------------------------------------------------------------------
 
 resource "libvirt_cloudinit_disk" "server" {
-  name      = "${var.vm_name}-cloudinit.iso"
+  name      = local.cloudinit_volume_name
   meta_data = ""
 
-  network_config = <<-EOT
-    version: 2
-    ethernets:
-      enp0s3:
-        dhcp4: true
-  EOT
+  network_config = local.cloudinit_network_config
 
-  user_data = templatefile("${path.module}/cloud-init/server.yaml", {
-    ssh_public_key = var.ssh_public_key
-  })
+  user_data = local.cloudinit_user_data
+}
+
+resource "libvirt_volume" "server_cloudinit_iso" {
+  name = local.cloudinit_volume_name
+  pool = "default"
+
+  target = {
+    format = {
+      type = "iso"
+    }
+  }
+
+  create = {
+    content = {
+      url = libvirt_cloudinit_disk.server.path
+    }
+  }
 }
 
 # ---------------------------------------------------------------------------
@@ -109,8 +135,9 @@ resource "libvirt_domain" "server" {
       {
         device = "cdrom"
         source = {
-          file = {
-            file = libvirt_cloudinit_disk.server.path
+          volume = {
+            pool   = "default"
+            volume = local.cloudinit_volume_name
           }
         }
         target = {
@@ -133,8 +160,18 @@ resource "libvirt_domain" "server" {
             bridge = var.vm_bridge_name
           } : null
         }
-        wait_for_ip = {
-          timeout = 120
+      }
+    ]
+
+    channels = [
+      {
+        source = {
+          unix = {}
+        }
+        target = {
+          virt_io = {
+            name = "org.qemu.guest_agent.0"
+          }
         }
       }
     ]

@@ -19,3 +19,9 @@ write_files:
       TimeoutStartSec=5
       ExecStart=
       ExecStart=/lib/systemd/systemd-networkd-wait-online --timeout=5
+
+packages:
+  - qemu-guest-agent
+
+runcmd:
+  - [systemctl, enable, --now, qemu-guest-agent]
