@@ -23,6 +23,8 @@ async fn main() -> Result<()> {
         std::env::var("DATABASE_URL").context("DATABASE_URL environment variable not set")?;
     let interface_name =
         std::env::var("INTERFACE_NAME").context("INTERFACE_NAME environment variable not set")?;
+    let wan_interface =
+        std::env::var("WAN_INTERFACE").context("WAN_INTERFACE environment variable not set")?;
     let server_ipv6_str =
         std::env::var("SERVER_IPV6").context("SERVER_IPV6 environment variable not set")?;
     let client_ipv6_str =
@@ -36,13 +38,14 @@ async fn main() -> Result<()> {
         .context("CLIENT_IPV6 is not a valid IPv6 address")?;
 
     info!("Starting daemon");
-    info!("Interface: {interface_name}");
+    info!("Tunnel interface: {interface_name}");
+    info!("WAN interface: {wan_interface}");
     info!("Server IPv6: {server_ipv6}");
     info!("Client IPv6: {client_ipv6}");
 
-    // Load eBPF programs and attach to interface
+    // Load eBPF programs and attach to interfaces
     info!("Loading eBPF programs...");
-    let mut bpf = loader::load_and_attach(&interface_name, server_ipv6)?;
+    let mut bpf = loader::load_and_attach(&interface_name, &wan_interface, server_ipv6)?;
 
     // Connect to database
     info!("Connecting to database...");
