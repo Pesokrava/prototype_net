@@ -31,6 +31,18 @@ pub struct ServerConfig {
     pub prefix: [u8; 16],
 }
 
+/// NAT_FLOWS value: tracks an active NAT'd TCP/UDP flow by server-side src port.
+///
+/// Keyed by `u16` src port (the port the server uses when forwarding to origin).
+/// Looked up by `tc_ingress_wan` using the reply packet's dst port.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FlowEntry {
+    pub domain_id: u32,
+    pub _pad: u32,
+    pub client_ipv6: [u8; 16],
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -86,3 +98,6 @@ unsafe impl aya::Pod for ReverseEntry {}
 
 #[cfg(feature = "userspace")]
 unsafe impl aya::Pod for ServerConfig {}
+
+#[cfg(feature = "userspace")]
+unsafe impl aya::Pod for FlowEntry {}
