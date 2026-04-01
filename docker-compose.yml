@@ -20,9 +20,21 @@ services:
     environment:
       DNS_SERVER: ${SERVER_VM_IP}
       SERVER_IP: ${SERVER_VM_IP}
+      CLIENT_IPV6: ${CLIENT_IPV6:-fd00:abcd:0:1::2}
     volumes:
       - ./certs/output:/certs:ro
+    networks:
+      default:
+        ipv6_address: "fd00:dead::2"
     restart: unless-stopped
+
+networks:
+  default:
+    enable_ipv6: true
+    ipam:
+      config:
+        - subnet: "172.19.0.0/16"
+        - subnet: "fd00:dead::/64"
 
 volumes:
   pgdata:
