@@ -33,6 +33,11 @@
     content: |
       net.ipv6.conf.all.forwarding=1
       net.ipv6.conf.default.forwarding=1
+      # Disable XFRM policy re-check on xfrm0 after eBPF has already rewritten
+      # the packet addresses — the inbound XFRM check runs against the original
+      # (pre-eBPF) addresses, so re-checking the rewritten packet would find no
+      # matching policy and silently drop it.
+      net.ipv6.conf.xfrm0.disable_policy=1
     owner: root
     group: root
     mode: "0644"
@@ -63,6 +68,18 @@
 
 # ---------------------------------------------------------------------------
 # strongSwan config
+# ---------------------------------------------------------------------------
+# NOTE: XFRM kernel policies are generated exclusively by strongSwan via its
+# VICI interface when a child SA is established.  Do NOT add manual XFRM
+# policies with "ip xfrm policy add" — they are not managed here, will not
+# survive a strongSwan reload/restart, and can mask real policy mismatches
+# during debugging.  If stale permissive policies are found (reqid=0, src/dst
+# ::/0), remove them with:
+#   sudo ip xfrm policy delete src ::/0 dst ::/0 dir fwd
+#   sudo ip xfrm policy delete src ::/0 dst ::/0 dir in
+# The net.ipv6.conf.xfrm0.disable_policy=1 sysctl (set above) makes
+# strongSwan's policies irrelevant for traffic that has already been rewritten
+# by eBPF — but all other interfaces still rely on correct XFRM policies.
 # ---------------------------------------------------------------------------
 
 - name: Create strongSwan swanctl config directory
@@ -97,6 +114,8 @@
                       local_ts = ::/0
                       remote_ts = fd00:abcd::/32
                       mode = tunnel
+                      if_id_in = 1
+                      if_id_out = 1
                       start_action = none
                       dpd_action = clear
                   }
@@ -123,20 +142,53 @@
 # Systemd units
 # ---------------------------------------------------------------------------
 
+- name: Write prototype-xfrm0 systemd unit
+  copy:
+    dest: /etc/systemd/system/prototype-xfrm0.service
+    content: |
+      [Unit]
+      Description=Create xfrm0 XFRM interface for prototype_net
+      After=network-online.target
+      Wants=network-online.target
+      # Re-run on network events so xfrm0 is re-created if the interface is removed
+      PartOf=network-online.target
+
+      [Service]
+      Type=oneshot
+      RemainAfterExit=yes
+      # Idempotent: only create xfrm0 if it does not already exist.
+      # The old "ExecStartPre=-ip link del xfrm0" unconditionally destroyed the
+      # interface (and any TC attachments on it) on every restart — replaced here
+      # with a conditional add that is a no-op when xfrm0 is already healthy.
+      ExecStart=/bin/sh -c 'ip link show xfrm0 >/dev/null 2>&1 || ip link add xfrm0 type xfrm if_id 1 dev enp0s3'
+      ExecStart=/sbin/ip link set xfrm0 up
+
+      [Install]
+      WantedBy=multi-user.target
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload systemd
+
 - name: Write prototype-daemon systemd unit
   copy:
     dest: /etc/systemd/system/prototype-daemon.service
     content: |
       [Unit]
       Description=prototype_net eBPF daemon
-      After=network-online.target strongswan-starter.service
+      After=network-online.target strongswan-starter.service prototype-xfrm0.service
       Wants=network-online.target
+      # BindsTo ensures the daemon is restarted whenever prototype-xfrm0 is
+      # restarted (e.g. xfrm0 interface recreated), so TC attachments are
+      # always re-established after any xfrm0 teardown.
+      BindsTo=prototype-xfrm0.service
 
       [Service]
       Type=simple
       ExecStart=/opt/prototype_net/daemon
       Environment=DATABASE_URL=postgres://prototype:{{ postgres_password }}@{{ host_bridge_ip }}:5432/prototype_net
       Environment=INTERFACE_NAME=xfrm0
+      Environment=WAN_INTERFACE=enp0s3
       Environment=SERVER_IPV6={{ server_ipv6 }}
       Environment=CLIENT_IPV6={{ client_ipv6 }}
       Restart=on-failure
@@ -177,6 +229,12 @@
 # ---------------------------------------------------------------------------
 # Enable services (they start once binaries + certs are deployed)
 # ---------------------------------------------------------------------------
+
+- name: Enable prototype-xfrm0 service
+  systemd:
+    name: prototype-xfrm0.service
+    enabled: true
+    daemon_reload: true
 
 - name: Enable strongswan-starter service
   systemd:
