@@ -17,17 +17,37 @@ fi
 SERVER_IP="$1"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 OUTPUT_DIR="${SCRIPT_DIR}/output"
+SERIAL_FILE="${OUTPUT_DIR}/ca.srl"
 
 mkdir -p "${OUTPUT_DIR}"
+rm -f "${SERIAL_FILE}"
 
 echo "=== Generating CA key and certificate ==="
 openssl genrsa -out "${OUTPUT_DIR}/ca.key" 4096
+
+cat > "${OUTPUT_DIR}/ca_ext.cnf" <<EOF
+[req]
+distinguished_name = req_distinguished_name
+x509_extensions = v3_ca
+prompt = no
+
+[req_distinguished_name]
+CN = prototype-net-ca
+
+[v3_ca]
+basicConstraints = critical,CA:TRUE
+keyUsage = critical,keyCertSign,cRLSign
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always,issuer
+EOF
+
 openssl req -x509 -new -nodes \
     -key "${OUTPUT_DIR}/ca.key" \
     -sha256 \
     -days 3650 \
     -out "${OUTPUT_DIR}/ca.crt" \
-    -subj "/CN=prototype-net-ca"
+    -config "${OUTPUT_DIR}/ca_ext.cnf" \
+    -extensions v3_ca
 
 echo "=== Generating server key and certificate ==="
 openssl genrsa -out "${OUTPUT_DIR}/server.key" 4096
@@ -49,6 +69,7 @@ openssl x509 -req \
     -in "${OUTPUT_DIR}/server.csr" \
     -CA "${OUTPUT_DIR}/ca.crt" \
     -CAkey "${OUTPUT_DIR}/ca.key" \
+    -CAserial "${SERIAL_FILE}" \
     -CAcreateserial \
     -out "${OUTPUT_DIR}/server.crt" \
     -days 365 \
@@ -74,7 +95,7 @@ openssl x509 -req \
     -in "${OUTPUT_DIR}/client.csr" \
     -CA "${OUTPUT_DIR}/ca.crt" \
     -CAkey "${OUTPUT_DIR}/ca.key" \
-    -CAcreateserial \
+    -CAserial "${SERIAL_FILE}" \
     -out "${OUTPUT_DIR}/client.crt" \
     -days 365 \
     -sha256 \
