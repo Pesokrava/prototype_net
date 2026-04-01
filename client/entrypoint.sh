@@ -74,23 +74,31 @@ if [ -n "$DNS_SERVER" ]; then
 fi
 
 # --- Add route for synthetic prefix ---
-# Find the IPSec virtual interface (usually xfrm* or similar)
-TUNNEL_IF=""
+# In TUNNEL-in-UDP (NAT-T) mode strongSwan installs xfrm policies directly on
+# the outbound interface rather than creating a named virtual interface.
+# Find the interface that holds the default IPv4 route (used to reach the server)
+# and add the fd00:abcd::/32 route on it so the kernel applies the xfrm policy.
+OUTBOUND_IF=""
+# Try xfrm/ipsec/vti named interfaces first (non-NAT-T kernels)
 for iface in $(ip -6 route show 2>/dev/null | grep -o 'dev [^ ]*' | awk '{print $2}' | sort -u); do
     case "$iface" in
         xfrm*|ipsec*|vti*)
-            TUNNEL_IF="$iface"
+            OUTBOUND_IF="$iface"
             break
             ;;
     esac
 done
+# Fall back to the interface used for the default IPv4 route (NAT-T / TUNNEL-in-UDP)
+if [ -z "$OUTBOUND_IF" ]; then
+    OUTBOUND_IF=$(ip route show default 2>/dev/null | awk '/default/{print $5; exit}')
+fi
 
-if [ -n "$TUNNEL_IF" ]; then
-    echo "Adding route for fd00:abcd::/32 via ${TUNNEL_IF}"
-    ip -6 route add fd00:abcd::/32 dev "$TUNNEL_IF" 2>/dev/null || true
+if [ -n "$OUTBOUND_IF" ]; then
+    echo "Adding route for fd00:abcd::/32 via ${OUTBOUND_IF}"
+    ip -6 route add fd00:abcd::/32 dev "$OUTBOUND_IF" 2>/dev/null || true
 else
-    echo "WARNING: No tunnel interface found — route not added"
-    echo "  Available interfaces: $(ip link show | grep -oP '^\d+: \K[^:@]+')"
+    echo "WARNING: Could not determine outbound interface — route not added"
+    echo "  Available interfaces: $(ip link show | awk -F': ' '/^[0-9]+:/{print $2}')"
 fi
 
 echo ""

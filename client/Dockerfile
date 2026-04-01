@@ -4,7 +4,9 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     strongswan \
+    strongswan-charon \
     strongswan-swanctl \
+    libstrongswan-standard-plugins \
     libcharon-extra-plugins \
     curl \
     iproute2 \
