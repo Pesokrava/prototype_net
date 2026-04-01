@@ -74,32 +74,38 @@ if [ -n "$DNS_SERVER" ]; then
 fi
 
 # --- Add route for synthetic prefix ---
-# In TUNNEL-in-UDP (NAT-T) mode strongSwan installs xfrm policies directly on
-# the outbound interface rather than creating a named virtual interface.
-# Find the interface that holds the default IPv4 route (used to reach the server)
-# and add the fd00:abcd::/32 route on it so the kernel applies the xfrm policy.
-OUTBOUND_IF=""
-# Try xfrm/ipsec/vti named interfaces first (non-NAT-T kernels)
-for iface in $(ip -6 route show 2>/dev/null | grep -o 'dev [^ ]*' | awk '{print $2}' | sort -u); do
-    case "$iface" in
-        xfrm*|ipsec*|vti*)
-            OUTBOUND_IF="$iface"
-            break
-            ;;
-    esac
-done
-# Fall back to the interface used for the default IPv4 route (NAT-T / TUNNEL-in-UDP)
-if [ -z "$OUTBOUND_IF" ]; then
-    OUTBOUND_IF=$(ip route show default 2>/dev/null | awk '/default/{print $5; exit}')
+# The tunnel uses NAT-T (ESP-in-UDP over IPv4). strongSwan installs XFRM
+# policies that match fd00:abcd::/32 outbound traffic and encapsulate it.
+# We need an IPv6 route so the kernel selects eth0 (which has the client's
+# IPv6 address) as the outbound interface for the XFRM policy to fire.
+CLIENT_IPV6="${CLIENT_IPV6:-}"
+if [ -n "$CLIENT_IPV6" ]; then
+    echo "Ensuring client IPv6 address ${CLIENT_IPV6} is on eth0..."
+    # Use /128 (host route only) so the kernel does NOT create an on-link
+    # fd00:abcd::/64 subnet route that would shadow the fd00:abcd::/32
+    # XFRM policy route and send synthetic traffic directly on-link.
+    ip -6 addr add "${CLIENT_IPV6}/128" dev eth0 2>/dev/null || true
 fi
 
-if [ -n "$OUTBOUND_IF" ]; then
-    echo "Adding route for fd00:abcd::/32 via ${OUTBOUND_IF}"
-    ip -6 route add fd00:abcd::/32 dev "$OUTBOUND_IF" 2>/dev/null || true
-else
-    echo "WARNING: Could not determine outbound interface — route not added"
-    echo "  Available interfaces: $(ip link show | awk -F': ' '/^[0-9]+:/{print $2}')"
-fi
+# --- Create XFRM interface for if_id=1 ---
+# The swanctl config sets if_id_in/out = 1 on the CHILD_SA, which means the
+# kernel uses XFRM interface if_id=1 for tunnel traffic. We must create a
+# matching xfrm netdev so the kernel can route packets through the tunnel.
+echo "Creating xfrm0 interface (if_id=1) on eth0..."
+ip link del xfrm0 2>/dev/null || true
+ip link add xfrm0 type xfrm if_id 1 dev eth0
+ip link set xfrm0 up
+ip -6 addr add "${CLIENT_IPV6:-fd00:abcd:0:1::2}/128" dev xfrm0 2>/dev/null || true
+
+echo "Adding route for fd00:abcd::/32 via xfrm0"
+ip -6 route replace fd00:abcd::/32 dev xfrm0 2>/dev/null || \
+    ip -6 route add    fd00:abcd::/32 dev xfrm0 2>/dev/null || true
+
+echo ""
+echo "==> IPv6 addresses on eth0:"
+ip -6 addr show dev eth0
+echo "==> IPv6 routes:"
+ip -6 route show
 
 echo ""
 echo "=== Test client ready ==="
