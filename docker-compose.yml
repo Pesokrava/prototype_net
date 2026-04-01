@@ -17,8 +17,6 @@ services:
     cap_add:
       - NET_ADMIN
     privileged: true
-    depends_on:
-      - postgres
     environment:
       DNS_SERVER: ${SERVER_VM_IP}
       SERVER_IP: ${SERVER_VM_IP}

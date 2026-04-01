@@ -229,39 +229,11 @@ vm-provision:
 		-e postgres_password=$(TF_VAR_postgres_password) \
 		-e host_bridge_ip=$(TF_VAR_host_bridge_ip) \
 		-e server_ipv6=$(TF_VAR_server_ipv6) \
+		-e client_ipv6=$(CLIENT_IPV6) \
 		-e dns_listen_addr=$(TF_VAR_dns_listen_addr) \
 		ansible/site.yml
 	@echo ""
 	@echo "==> VM provisioned. Next: make certs && make dev-build && make deploy"
-
-vm-ip:
-	@if [ "$$(uname -s)" != "Linux" ] || [ ! -S /var/run/libvirt/libvirt-sock ]; then \
-		echo "ERROR: vm-ip must be run on a Linux host with libvirt qemu:///system."; \
-		exit 1; \
-	fi
-	@IP=$$(virsh -c qemu:///system domifaddr --source agent prototype-net-server 2>/dev/null | awk '/ipv4/{print $$4}' | cut -d/ -f1 | head -n1); \
-	if [ -n "$$IP" ]; then \
-		echo "$$IP"; \
-		exit 0; \
-	fi; \
-	BRIDGE=$(TF_VAR_vm_bridge_name); \
-	MAC=$$(virsh -c qemu:///system domiflist prototype-net-server 2>/dev/null | awk '/bridge|network/{print $$5; exit}'); \
-	if [ -z "$$MAC" ]; then \
-		echo "ERROR: VM not found or no NIC attached."; \
-		exit 1; \
-	fi; \
-	if [ -n "$$BRIDGE" ]; then \
-		IP=$$(ip neigh show dev $$BRIDGE | awk -v mac="$$MAC" 'tolower($$0) ~ tolower(mac) {print $$1}' | grep -v '^fe80:' | head -n1); \
-		if [ -n "$$IP" ]; then \
-			echo "$$IP"; \
-		else \
-			echo "ERROR: no IPv4 neighbor entry for $$MAC on $$BRIDGE."; \
-			echo "Try: sudo virt-cat -a /var/lib/libvirt/images/prototype-net-server-disk.qcow2 /var/log/syslog | grep 'DHCPv4 address'"; \
-			exit 1; \
-		fi; \
-	else \
-		virsh -c qemu:///system domifaddr prototype-net-server | awk '/ipv4/{print $$4}' | cut -d/ -f1; \
-	fi
 
 vm-ssh:
 	$(call require,SERVER_VM_IP)
@@ -299,7 +271,7 @@ postgres-down:
 
 deploy: deploy-bins deploy-certs
 	@echo "==> Restarting services on VM..."
-	$(SSH) 'sudo swanctl --load-all && sudo systemctl restart strongswan-starter prototype-daemon prototype-dns-server'
+	$(SSH) 'sudo systemctl restart strongswan-starter && LOADED=0; for i in $$(seq 1 20); do if sudo swanctl --load-all >/dev/null 2>&1; then LOADED=1; break; fi; sleep 1; done; if [ $$LOADED -ne 1 ]; then echo "ERROR: strongSwan VICI socket not ready"; sudo systemctl status strongswan-starter --no-pager -l; exit 1; fi; sudo systemctl restart prototype-daemon prototype-dns-server'
 	@echo "==> Waiting for services..."
 	@sleep 3
 	$(SSH) 'sudo systemctl is-active prototype-daemon prototype-dns-server strongswan-starter'
@@ -339,7 +311,7 @@ client-up:
 	$(call require,SERVER_VM_IP)
 	@test -f $(CERT_DIR)/client.crt || (echo "ERROR: client certs not found — run: make certs" && exit 1)
 	@echo "==> Starting test client..."
-	docker compose up -d client
+	docker compose up -d --no-deps client
 	@echo "==> Waiting for tunnel to establish..."
 	@for i in $$(seq 1 30); do \
 		docker compose exec client swanctl --list-sas 2>/dev/null | grep -q ESTABLISHED && \
@@ -352,7 +324,7 @@ client-up-mac:
 	$(call require,SERVER_VM_IP)
 	@test -f $(CERT_DIR)/client.crt || (echo "ERROR: client certs not found — run: make certs" && exit 1)
 	@echo "==> Starting test client (macOS)..."
-	docker compose up -d client
+	docker compose up -d --no-deps client
 	@echo "==> Waiting for tunnel to establish..."
 	@for i in $$(seq 1 30); do \
 		docker compose exec client swanctl --list-sas 2>/dev/null | grep -q ESTABLISHED && \
