@@ -100,7 +100,7 @@ scp certs/output/server.crt ubuntu@${VM_IP}:/etc/swanctl/x509/
 scp certs/output/server.key ubuntu@${VM_IP}:/etc/swanctl/private/
 
 # Start services
-ssh ubuntu@${VM_IP} 'sudo systemctl restart strongswan-starter prototype-daemon prototype-dns-server'
+ssh ubuntu@${VM_IP} 'sudo systemctl restart strongswan-starter && for i in $(seq 1 20); do sudo swanctl --load-all >/dev/null 2>&1 && break; sleep 1; done && sudo systemctl restart prototype-daemon prototype-dns-server'
 ```
 
 ### 8. Start test client
