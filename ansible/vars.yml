@@ -17,5 +17,9 @@ postgres_password: ""
 # Set after first boot: ssh ubuntu@<VM_IP> ip -6 addr show scope global
 server_ipv6: ""
 
+# VPN client's IPv6 address used by daemon reverse-map population.
+# For the default test-client config this is fd00:abcd:0000:0001::2.
+client_ipv6: "fd00:abcd:0000:0001::2"
+
 # IP address the DNS server binds to inside the VM.
 dns_listen_addr: "0.0.0.0"

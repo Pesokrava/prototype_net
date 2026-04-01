@@ -39,6 +39,29 @@
   notify: Apply sysctl
 
 # ---------------------------------------------------------------------------
+# systemd-resolved — disable stub listener so dns-server can own port 53
+# ---------------------------------------------------------------------------
+
+- name: Create systemd-resolved drop-in directory
+  file:
+    path: /etc/systemd/resolved.conf.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Disable systemd-resolved stub listener
+  copy:
+    dest: /etc/systemd/resolved.conf.d/disable-stub.conf
+    content: |
+      [Resolve]
+      DNSStubListener=no
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart systemd-resolved
+
+# ---------------------------------------------------------------------------
 # strongSwan config
 # ---------------------------------------------------------------------------
 
@@ -106,7 +129,7 @@
     content: |
       [Unit]
       Description=prototype_net eBPF daemon
-      After=network-online.target strongswan.service
+      After=network-online.target strongswan-starter.service
       Wants=network-online.target
 
       [Service]
@@ -115,6 +138,7 @@
       Environment=DATABASE_URL=postgres://prototype:{{ postgres_password }}@{{ host_bridge_ip }}:5432/prototype_net
       Environment=INTERFACE_NAME=xfrm0
       Environment=SERVER_IPV6={{ server_ipv6 }}
+      Environment=CLIENT_IPV6={{ client_ipv6 }}
       Restart=on-failure
       RestartSec=5
 
@@ -154,9 +178,9 @@
 # Enable services (they start once binaries + certs are deployed)
 # ---------------------------------------------------------------------------
 
-- name: Enable strongswan service
+- name: Enable strongswan-starter service
   systemd:
-    name: strongswan.service
+    name: strongswan-starter.service
     enabled: true
     daemon_reload: true
 
