@@ -60,7 +60,7 @@ LIMA            = limactl shell $(DEV_VM_NAME)
         certs \
         vm-up vm-provision vm-ip vm-down vm-ssh \
         postgres-up postgres-down \
-        deploy deploy-bins deploy-certs \
+        deploy deploy-bins deploy-certs deploy-units \
         client-up client-up-mac client-down \
         test status logs-daemon logs-dns \
         clean clean-certs clean-all
@@ -96,9 +96,10 @@ help:
 	@echo "    postgres-down  Stop Postgres"
 	@echo ""
 	@echo "  Deploy"
-	@echo "    deploy         deploy-bins + deploy-certs + restart services"
+	@echo "    deploy         deploy-bins + deploy-certs + deploy-units + restart services"
 	@echo "    deploy-bins    SCP daemon + dns-server to server VM"
 	@echo "    deploy-certs   SCP TLS certs to server VM"
+	@echo "    deploy-units   Push systemd unit files to server VM + daemon-reload"
 	@echo ""
 	@echo "  Test"
 	@echo "    client-up      Start the test client container"
@@ -268,8 +269,25 @@ postgres-down:
 # ---------------------------------------------------------------------------
 # Deploy
 # ---------------------------------------------------------------------------
+#
+# IMPORTANT — what "make deploy" does and does NOT do:
+#
+#   deploy-bins    SCPs compiled binaries (daemon, dns-server) to the VM.
+#   deploy-certs   SCPs TLS certificates to the VM swanctl directories.
+#   deploy-units   Pushes systemd unit files from ansible/roles/…/tasks/main.yml
+#                  inline blocks to the VM via SSH and runs daemon-reload.
+#                  Required after any change to unit file content in main.yml.
+#   deploy         Runs all three sub-targets then restarts services.
+#
+# Changes to ansible/roles/prototype_net/tasks/main.yml that are NOT unit
+# files (e.g. sysctl, strongSwan config, package list) still require running
+# the full Ansible playbook:
+#   make vm-provision
+#   — or —
+#   ansible-playbook -i "$(SERVER_VM_IP)," -u ubuntu -e @ansible/vars.yml ... ansible/site.yml
+# ---------------------------------------------------------------------------
 
-deploy: deploy-bins deploy-certs
+deploy: deploy-bins deploy-certs deploy-units
 	@echo "==> Restarting services on VM..."
 	$(SSH) 'sudo systemctl restart strongswan-starter && LOADED=0; for i in $$(seq 1 20); do if sudo swanctl --load-all >/dev/null 2>&1; then LOADED=1; break; fi; sleep 1; done; if [ $$LOADED -ne 1 ]; then echo "ERROR: strongSwan VICI socket not ready"; sudo systemctl status strongswan-starter --no-pager -l; exit 1; fi; sudo systemctl restart prototype-daemon prototype-dns-server'
 	@echo "==> Waiting for services..."
@@ -285,6 +303,44 @@ deploy-bins:
 	@echo "==> Copying binaries to VM..."
 	$(SCP) $(RELEASE_DIR)/daemon $(RELEASE_DIR)/dns-server ubuntu@$(VM_IP):/tmp/
 	$(SSH) 'sudo mv /tmp/daemon /tmp/dns-server /opt/prototype_net/ && sudo chmod +x /opt/prototype_net/*'
+
+# deploy-units — push systemd unit files to the VM and reload systemd.
+#
+# Run this after any change to unit file content in
+# ansible/roles/prototype_net/tasks/main.yml.  Full provisioning changes
+# (sysctl, packages, strongSwan config) still require: make vm-provision
+deploy-units:
+	$(call require,SERVER_VM_IP)
+	$(call require,TF_VAR_postgres_password)
+	$(call require,TF_VAR_host_bridge_ip)
+	$(call require,TF_VAR_server_ipv6)
+	$(call require,CLIENT_IPV6)
+	$(call require,TF_VAR_dns_listen_addr)
+	@echo "==> Deploying systemd units to VM..."
+	@$(SSH) 'sudo tee /etc/systemd/system/prototype-xfrm0.service > /dev/null' <<'UNIT'
+	[Unit]
+	Description=Create xfrm0 XFRM interface for prototype_net
+	After=network-online.target
+	Wants=network-online.target
+	PartOf=network-online.target
+
+	[Service]
+	Type=oneshot
+	RemainAfterExit=yes
+	ExecStart=/bin/sh -c 'ip link show xfrm0 >/dev/null 2>&1 || ip link add xfrm0 type xfrm if_id 1 dev enp0s3'
+	ExecStart=/sbin/ip link set xfrm0 up
+
+	[Install]
+	WantedBy=multi-user.target
+	UNIT
+	@printf '[Unit]\nDescription=prototype_net eBPF daemon\nAfter=network-online.target strongswan-starter.service prototype-xfrm0.service\nWants=network-online.target\nBindsTo=prototype-xfrm0.service\n\n[Service]\nType=simple\nExecStart=/opt/prototype_net/daemon\nEnvironment=DATABASE_URL=postgres://prototype:%s@%s:5432/prototype_net\nEnvironment=INTERFACE_NAME=xfrm0\nEnvironment=WAN_INTERFACE=enp0s3\nEnvironment=SERVER_IPV6=%s\nEnvironment=CLIENT_IPV6=%s\nRestart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy=multi-user.target\n' \
+		'$(TF_VAR_postgres_password)' '$(TF_VAR_host_bridge_ip)' '$(TF_VAR_server_ipv6)' '$(CLIENT_IPV6)' \
+		| $(SSH) 'sudo tee /etc/systemd/system/prototype-daemon.service > /dev/null'
+	@printf '[Unit]\nDescription=prototype_net DNS server\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart=/opt/prototype_net/dns-server\nEnvironment=DATABASE_URL=postgres://prototype:%s@%s:5432/prototype_net\nEnvironment=LISTEN_ADDR=%s:53\nRestart=on-failure\nRestartSec=5\nAmbientCapabilities=CAP_NET_BIND_SERVICE\n\n[Install]\nWantedBy=multi-user.target\n' \
+		'$(TF_VAR_postgres_password)' '$(TF_VAR_host_bridge_ip)' '$(TF_VAR_dns_listen_addr)' \
+		| $(SSH) 'sudo tee /etc/systemd/system/prototype-dns-server.service > /dev/null'
+	$(SSH) 'sudo systemctl daemon-reload'
+	@echo "==> Unit files deployed and systemd reloaded."
 
 deploy-certs:
 	$(call require,SERVER_VM_IP)
@@ -353,9 +409,9 @@ test:
 	@echo "==> Test 3: HTTPS through NAT66 tunnel — youtube.com"
 	docker compose exec client curl -sv --max-time 15 https://youtube.com 2>&1 | grep -E "^[<>*]" | head -20
 	@echo ""
-	@echo "==> Test 4: Domain mappings in Postgres"
-	docker compose exec postgres psql -U prototype -d prototype_net -c "SELECT domain, synthetic_ipv6, real_ipv6 FROM domains ORDER BY created_at DESC LIMIT 10;"
-	@echo ""
+	# @echo "==> Test 4: Domain mappings in Postgres"
+	# docker compose exec postgres psql -U prototype -d prototype_net -c "SELECT domain, synthetic_ipv6, real_ipv6 FROM domains ORDER BY created_at DESC LIMIT 10;"
+	# @echo ""
 	@echo "==> Test 5: eBPF NAT map on VM"
 	$(SSH) 'sudo bpftool map dump name NAT_MAP 2>/dev/null || echo "(map empty or not loaded)"'
 
