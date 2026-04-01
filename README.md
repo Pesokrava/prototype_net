@@ -23,8 +23,8 @@ Physical Linux Host
 2. DNS server resolves upstream AAAA, mints a synthetic `fd00:abcd:XXXX:YYYY::1` address, stores mapping in Postgres
 3. Postgres NOTIFY triggers daemon to populate BPF maps
 4. Client sends traffic to synthetic address through IPSec tunnel
-5. eBPF TC ingress rewrites dst to real origin IPv6, src to server's public IPv6
-6. Origin responds; eBPF TC egress rewrites src back to synthetic, dst to client
+5. eBPF `tc_ingress` on `xfrm0` rewrites dst to real origin IPv6, src to server's public IPv6
+6. Origin responds; eBPF `tc_ingress_wan` on `enp0s3` rewrites src back to synthetic, dst to client, redirects to `xfrm0` for IPSec re-encapsulation
 7. Client receives response transparently
 
 ### IPv6 Address Layout
@@ -74,46 +74,33 @@ terraform apply
 cd ..
 ```
 
-### 5. Build eBPF program
+### 5. Build binaries (inside Lima build VM)
 
 ```bash
-cargo xtask build-ebpf
+make dev-up        # create Lima x86_64 build VM (first time only)
+make dev-build     # build eBPF + daemon + dns-server
 ```
 
-### 6. Build userspace binaries
+### 6. Deploy to VM
 
 ```bash
-cargo build --release -p daemon -p dns-server
+make deploy        # SCP binaries + certs + push systemd units, restart services
 ```
 
-### 7. Deploy to VM
+> `make deploy` pushes binaries, certificates, and systemd unit files.
+> Changes to sysctl, packages, or strongSwan config require a full re-provision:
+> `make vm-provision`
+
+### 7. Start test client
 
 ```bash
-VM_IP=$(cd terraform && terraform output -raw vm_ip)
-
-# Copy binaries
-scp target/release/daemon target/release/dns-server ubuntu@${VM_IP}:/opt/prototype_net/
-
-# Copy certificates
-scp certs/output/ca.crt ubuntu@${VM_IP}:/etc/swanctl/x509ca/
-scp certs/output/server.crt ubuntu@${VM_IP}:/etc/swanctl/x509/
-scp certs/output/server.key ubuntu@${VM_IP}:/etc/swanctl/private/
-
-# Start services
-ssh ubuntu@${VM_IP} 'sudo systemctl restart strongswan-starter && for i in $(seq 1 20); do sudo swanctl --load-all >/dev/null 2>&1 && break; sleep 1; done && sudo systemctl restart prototype-daemon prototype-dns-server'
+make client-up
 ```
 
-### 8. Start test client
+### 8. Test
 
 ```bash
-docker compose up -d client
-```
-
-### 9. Test
-
-```bash
-docker exec -it prototype-client curl -v https://google.com
-docker exec -it prototype-client curl -v https://youtube.com
+make test
 ```
 
 ## Environment Variables
@@ -123,10 +110,11 @@ docker exec -it prototype-client curl -v https://youtube.com
 | `POSTGRES_PASSWORD` | Postgres password | (required) |
 | `SERVER_VM_IP` | Server VM IP address | (required) |
 | `TF_VAR_host_bridge_ip` | Host bridge IP (virbr0) | `192.168.122.1` |
-| `TF_VAR_postgres_password` | Postgres password for Terraform | (required) |
+| `TF_VAR_postgres_password` | Postgres password for Terraform/Ansible | (required) |
 | `TF_VAR_server_ipv6` | Static IPv6 for server VM | (required) |
 | `TF_VAR_dns_listen_addr` | DNS server bind address | `0.0.0.0` |
-| `INTERFACE_NAME` | Tunnel interface for eBPF TC | (required) |
+| `INTERFACE_NAME` | Tunnel interface for `tc_ingress` (e.g. `xfrm0`) | (required) |
+| `WAN_INTERFACE` | WAN interface for `tc_ingress_wan` (e.g. `enp0s3`) | (required) |
 | `SERVER_IPV6` | Server's public IPv6 (NAT src) | (required) |
 | `CLIENT_IPV6` | VPN client's IPv6 (IKEv2 traffic selector) | (required) |
 | `DATABASE_URL` | Postgres connection string | (derived) |

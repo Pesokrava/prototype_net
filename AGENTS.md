@@ -9,14 +9,18 @@ Client DNS query --> dns-server (synthetic AAAA) --> Postgres (domain mapping)
                                                           |
                                                      pg_notify
                                                           |
-Client traffic --> IPSec tunnel --> daemon (eBPF loader) --> ebpf (TC NAT66)
+Client traffic --> IPSec tunnel --> xfrm0 --> ebpf tc_ingress (NAT66) --> origin
                                                           |
-                                                   BPF maps (NAT_MAP, REVERSE_MAP)
+                                              ebpf tc_ingress_wan (WAN ingress)
+                                                          |
+                                   BPF maps (NAT_MAP, REVERSE_MAP, NAT_FLOWS, XFRM_IFINDEX)
 ```
 
 The system works in two phases:
 1. **DNS phase**: The custom DNS server resolves domains, assigns synthetic `fd00:abcd::/32` addresses, and stores mappings in Postgres (which notifies the daemon).
-2. **Data plane**: eBPF programs on TC hooks rewrite IPv6 addresses in-kernel, translating between synthetic and real addresses for traffic traversing the IPSec tunnel.
+2. **Data plane**: eBPF programs on TC hooks rewrite IPv6 addresses in-kernel.
+   - `tc_ingress` on `xfrm0` ingress: rewrites synthetic dst→origin and src→server_pub for client→origin traffic.
+   - `tc_ingress_wan` on `enp0s3` ingress: rewrites origin src→synthetic and dst→client for reply traffic, then redirects to `xfrm0` for IPSec re-encapsulation.
 
 ## Toolchain
 
@@ -32,14 +36,14 @@ The system works in two phases:
 
 ## Configuration
 
-All runtime configuration is via environment variables. See `.env.example` for the full list. Key variables: `DATABASE_URL`, `INTERFACE_NAME`, `SERVER_IPV6`, `CLIENT_IPV6`, `LISTEN_ADDR`.
+All runtime configuration is via environment variables. See `.env.example` for the full list. Key variables: `DATABASE_URL`, `INTERFACE_NAME`, `WAN_INTERFACE`, `SERVER_IPV6`, `CLIENT_IPV6`, `LISTEN_ADDR`.
 
 ## Subdirectory Documentation
 
 Each top-level subdirectory contains its own `AGENTS.md` with detailed context about that directory's purpose, contents, and conventions:
 
 - [`common/AGENTS.md`](common/AGENTS.md) -- Shared `#[repr(C)]` BPF map types (`no_std` compatible, used by both eBPF and userspace).
-- [`ebpf/AGENTS.md`](ebpf/AGENTS.md) -- TC ingress/egress NAT66 eBPF programs (nightly Rust, `bpfel-unknown-none` target).
+- [`ebpf/AGENTS.md`](ebpf/AGENTS.md) -- TC NAT66 eBPF programs (`tc_ingress` on xfrm0, `tc_ingress_wan` on WAN interface) with per-flow `NAT_FLOWS` tracking (nightly Rust, `bpfel-unknown-none` target).
 - [`daemon/AGENTS.md`](daemon/AGENTS.md) -- Userspace daemon: eBPF loader, BPF map sync from Postgres, periodic DNS re-resolution.
 - [`dns-server/AGENTS.md`](dns-server/AGENTS.md) -- Custom DNS server: mints synthetic AAAA records, stores mappings in Postgres.
 - [`xtask/AGENTS.md`](xtask/AGENTS.md) -- Build automation for cross-compiling the eBPF crate.
