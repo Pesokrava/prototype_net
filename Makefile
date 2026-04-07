@@ -51,8 +51,13 @@ LINUX_TARGET    = x86_64-unknown-linux-gnu
 RELEASE_DIR     = target/$(LINUX_TARGET)/release
 CERT_DIR        = certs/output
 TERRAFORM_DIR   = terraform
-SSH             = ssh -o StrictHostKeyChecking=no ubuntu@$(VM_IP)
-SCP             = scp -o StrictHostKeyChecking=no
+SSH_OPTS        = -o StrictHostKeyChecking=no
+SSH             = ssh $(SSH_OPTS) ubuntu@$(VM_IP)
+SCP             = scp $(SSH_OPTS)
+TERRAFORM       = terraform -chdir=$(TERRAFORM_DIR)
+DOCKER_COMPOSE  = docker compose
+BINARIES        = daemon dns-server
+CERT_FILES      = ca.crt server.crt server.key
 
 # Lima build VM
 DEV_VM_NAME     = prototype-net-build
@@ -66,10 +71,10 @@ LIMA            = limactl shell $(DEV_VM_NAME)
 
 .PHONY: help dev-up dev-shell dev-build dev-build-ebpf dev-down dev-destroy \
         certs client-cert \
-        vm-up vm-provision vm-ip vm-down vm-ssh \
+        vm-up vm-provision vm-ip vm-down vm-ssh terraform-init \
         postgres-up postgres-down \
         deploy deploy-bins deploy-certs deploy-units \
-        client-up client-up-mac client-down \
+        client-up client-up-mac _client-up client-down \
         test status logs-daemon logs-dns \
         clean clean-certs clean-all
 
@@ -192,7 +197,10 @@ client-cert:
 # VM
 # ---------------------------------------------------------------------------
 
-vm-up:
+terraform-init:
+	@$(TERRAFORM) init -upgrade -input=false >/dev/null
+
+vm-up: terraform-init
 	@KEY='$(TF_VAR_ssh_public_key)'; \
 	if [ -z "$$KEY" ]; then \
 		echo "ERROR: TF_VAR_ssh_public_key is empty."; \
@@ -207,7 +215,7 @@ vm-up:
 	fi
 	@echo "==> Applying Terraform from this machine..."
 	@echo "==> Using libvirt URI: $${TF_VAR_libvirt_uri:-qemu:///system}"
-	@cd $(TERRAFORM_DIR) && terraform init -upgrade -input=false >/dev/null && terraform apply -auto-approve -input=false
+	@$(TERRAFORM) apply -auto-approve -input=false
 	@URI=$${TF_VAR_libvirt_uri:-qemu:///system}; \
 	case "$$URI" in \
 		qemu:///system) \
@@ -260,10 +268,10 @@ vm-ssh:
 	$(call require,SERVER_VM_IP)
 	$(SSH)
 
-vm-down:
+vm-down: terraform-init
 	@echo "==> Destroying VM from this machine..."
 	@echo "==> Using libvirt URI: $${TF_VAR_libvirt_uri:-qemu:///system}"
-	@cd $(TERRAFORM_DIR) && terraform init -upgrade -input=false >/dev/null && terraform destroy -auto-approve -input=false
+	@$(TERRAFORM) destroy -auto-approve -input=false
 	@echo "==> VM destroyed. Next run of 'make vm-up' will create a fresh VM."
 
 # ---------------------------------------------------------------------------
@@ -273,10 +281,10 @@ vm-down:
 postgres-up:
 	$(call require,POSTGRES_PASSWORD)
 	@echo "==> Starting Postgres..."
-	docker compose up -d postgres
+	$(DOCKER_COMPOSE) up -d postgres
 	@echo "==> Waiting for Postgres to be ready..."
 	@for i in $$(seq 1 20); do \
-		docker compose exec postgres pg_isready -U prototype -d prototype_net -q && break; \
+		$(DOCKER_COMPOSE) exec postgres pg_isready -U prototype -d prototype_net -q && break; \
 		echo "  waiting... ($$i/20)"; \
 		sleep 2; \
 	done
@@ -284,7 +292,7 @@ postgres-up:
 
 postgres-down:
 	@echo "==> Stopping Postgres..."
-	docker compose stop postgres
+	$(DOCKER_COMPOSE) stop postgres
 
 # ---------------------------------------------------------------------------
 # Deploy
@@ -316,13 +324,14 @@ deploy: deploy-bins deploy-certs deploy-units
 
 deploy-bins:
 	$(call require,SERVER_VM_IP)
-	@test -f $(RELEASE_DIR)/daemon || (echo "ERROR: $(RELEASE_DIR)/daemon not found — run: make dev-build" && exit 1)
-	@test -f $(RELEASE_DIR)/dns-server || (echo "ERROR: $(RELEASE_DIR)/dns-server not found — run: make dev-build" && exit 1)
+	@for bin in $(BINARIES); do \
+		test -f "$(RELEASE_DIR)/$$bin" || { echo "ERROR: $(RELEASE_DIR)/$$bin not found — run: make dev-build"; exit 1; }; \
+	done
 	@echo "==> Creating /opt/prototype_net on VM..."
 	$(SSH) 'sudo mkdir -p /opt/prototype_net'
 	@echo "==> Copying binaries to VM..."
-	$(SCP) $(RELEASE_DIR)/daemon $(RELEASE_DIR)/dns-server ubuntu@$(VM_IP):/tmp/
-	$(SSH) 'sudo mv /tmp/daemon /tmp/dns-server /opt/prototype_net/ && sudo chmod +x /opt/prototype_net/*'
+	$(SCP) $(addprefix $(RELEASE_DIR)/,$(BINARIES)) ubuntu@$(VM_IP):/tmp/
+	$(SSH) 'sudo mv $(addprefix /tmp/,$(BINARIES)) /opt/prototype_net/ && sudo chmod +x /opt/prototype_net/*'
 
 # deploy-units — push systemd unit files to the VM and reload systemd.
 #
@@ -366,13 +375,13 @@ deploy-units:
 
 deploy-certs:
 	$(call require,SERVER_VM_IP)
-	@test -f $(CERT_DIR)/ca.crt     || (echo "ERROR: certs not found — run: make certs" && exit 1)
-	@test -f $(CERT_DIR)/server.crt || (echo "ERROR: certs not found — run: make certs" && exit 1)
-	@test -f $(CERT_DIR)/server.key || (echo "ERROR: certs not found — run: make certs" && exit 1)
+	@for cert in $(CERT_FILES); do \
+		test -f "$(CERT_DIR)/$$cert" || { echo "ERROR: certs not found — run: make certs"; exit 1; }; \
+	done
 	@echo "==> Copying certificates to VM..."
-	$(SCP) $(CERT_DIR)/ca.crt     ubuntu@$(VM_IP):/tmp/ca.crt
-	$(SCP) $(CERT_DIR)/server.crt ubuntu@$(VM_IP):/tmp/server.crt
-	$(SCP) $(CERT_DIR)/server.key ubuntu@$(VM_IP):/tmp/server.key
+	@for cert in $(CERT_FILES); do \
+		$(SCP) "$(CERT_DIR)/$$cert" "ubuntu@$(VM_IP):/tmp/$$cert"; \
+	done
 	$(SSH) ' \
 		sudo mkdir -p /etc/swanctl/x509ca /etc/swanctl/x509 /etc/swanctl/private && \
 		sudo mv /tmp/ca.crt     /etc/swanctl/x509ca/ca.crt     && \
@@ -385,27 +394,20 @@ deploy-certs:
 # Test client
 # ---------------------------------------------------------------------------
 
-client-up:
-	$(call require,SERVER_VM_IP)
-	@test -f $(CERT_DIR)/client-test-client.crt || (echo "ERROR: client certs not found — run: make certs" && exit 1)
-	@echo "==> Starting test client..."
-	docker compose up -d --no-deps client
-	@echo "==> Waiting for tunnel to establish..."
-	@for i in $$(seq 1 30); do \
-		docker compose exec client swanctl --list-sas 2>/dev/null | grep -q ESTABLISHED && \
-			echo "  Tunnel established!" && break; \
-		echo "  waiting for tunnel... ($$i/30)"; \
-		sleep 2; \
-	done
+client-up: CLIENT_UP_LABEL = test client
+client-up: _client-up
 
-client-up-mac:
+client-up-mac: CLIENT_UP_LABEL = test client (macOS)
+client-up-mac: _client-up
+
+_client-up:
 	$(call require,SERVER_VM_IP)
 	@test -f $(CERT_DIR)/client-test-client.crt || (echo "ERROR: client certs not found — run: make certs" && exit 1)
-	@echo "==> Starting test client (macOS)..."
-	docker compose up -d --no-deps client
+	@echo "==> Starting $(CLIENT_UP_LABEL)..."
+	$(DOCKER_COMPOSE) up -d --no-deps client
 	@echo "==> Waiting for tunnel to establish..."
 	@for i in $$(seq 1 30); do \
-		docker compose exec client swanctl --list-sas 2>/dev/null | grep -q ESTABLISHED && \
+		$(DOCKER_COMPOSE) exec client swanctl --list-sas 2>/dev/null | grep -q ESTABLISHED && \
 			echo "  Tunnel established!" && break; \
 		echo "  waiting for tunnel... ($$i/30)"; \
 		sleep 2; \
@@ -413,7 +415,7 @@ client-up-mac:
 
 client-down:
 	@echo "==> Stopping test client..."
-	docker compose stop client
+	$(DOCKER_COMPOSE) stop client
 
 # ---------------------------------------------------------------------------
 # Tests
@@ -423,13 +425,13 @@ test:
 	$(call require,SERVER_VM_IP)
 	@echo ""
 	@echo "==> Test 1: AAAA DNS query (should return synthetic fd00:abcd::* address)"
-	docker compose exec client dig AAAA google.com +short
+	$(DOCKER_COMPOSE) exec client dig AAAA google.com +short
 	@echo ""
 	@echo "==> Test 2: HTTPS through NAT66 tunnel — google.com"
-	docker compose exec client curl -sv --max-time 15 https://google.com 2>&1 | grep -E "^[<>*]" | head -20
+	$(DOCKER_COMPOSE) exec client curl -sv --max-time 15 https://google.com 2>&1 | grep -E "^[<>*]" | head -20
 	@echo ""
 	@echo "==> Test 3: HTTPS through NAT66 tunnel — youtube.com"
-	docker compose exec client curl -sv --max-time 15 https://youtube.com 2>&1 | grep -E "^[<>*]" | head -20
+	$(DOCKER_COMPOSE) exec client curl -sv --max-time 15 https://youtube.com 2>&1 | grep -E "^[<>*]" | head -20
 	@echo ""
 	# @echo "==> Test 4: Domain mappings in Postgres"
 	# docker compose exec postgres psql -U prototype -d prototype_net -c "SELECT domain, synthetic_ipv6, real_ipv6 FROM domains ORDER BY created_at DESC LIMIT 10;"
@@ -468,9 +470,9 @@ clean-certs:
 
 clean-all: clean clean-certs
 	@echo "==> Stopping and removing all Docker containers and volumes..."
-	docker compose down -v --remove-orphans
+	$(DOCKER_COMPOSE) down -v --remove-orphans
 	@echo "==> Destroying server VM..."
-	cd $(TERRAFORM_DIR) && terraform destroy -auto-approve || true
+	@$(TERRAFORM) destroy -auto-approve || true
 	@echo "==> Removing Terraform state..."
 	rm -rf $(TERRAFORM_DIR)/.terraform $(TERRAFORM_DIR)/terraform.tfstate $(TERRAFORM_DIR)/terraform.tfstate.backup
 	@echo "==> Deleting Lima build VM..."
