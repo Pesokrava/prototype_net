@@ -9,32 +9,45 @@ use tracing::info;
 /// Path where BPF maps are pinned for persistence.
 const BPF_PIN_PATH: &str = "/sys/fs/bpf/prototype_net";
 
-/// Maximum number of seconds to wait for the tunnel interface to appear.
-const IFACE_WAIT_SECS: u64 = 300;
 /// Polling interval while waiting for the interface.
 const IFACE_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
-/// Block until the network interface `name` appears under /sys/class/net,
-/// or return an error if `IFACE_WAIT_SECS` elapses first.
-fn wait_for_interface(name: &str) -> Result<()> {
+/// Async: wait indefinitely for the network interface `name` to appear under
+/// /sys/class/net, polling every `IFACE_POLL_INTERVAL`.
+///
+/// Returns `Ok(())` once the interface exists, or `Err` if a shutdown signal
+/// (SIGINT / SIGTERM) is received before the interface appears.
+pub async fn wait_for_interface(name: &str) -> Result<()> {
+    use tokio::signal::unix::{SignalKind, signal};
+
     let sysfs_path = format!("/sys/class/net/{name}");
-    let deadline = std::time::Instant::now() + Duration::from_secs(IFACE_WAIT_SECS);
+
+    // Register SIGTERM handler once, before entering the poll loop.
+    let mut sigterm = signal(SignalKind::terminate())
+        .context("failed to register SIGTERM handler")?;
+
     loop {
         if Path::new(&sysfs_path).exists() {
             info!("Interface {name} is ready");
             return Ok(());
         }
-        if std::time::Instant::now() >= deadline {
-            anyhow::bail!(
-                "interface {name} did not appear within {IFACE_WAIT_SECS}s — \
-                 is the IPSec tunnel established?"
-            );
-        }
+
         info!(
             "Waiting for interface {name} to appear (retrying in {}s)...",
             IFACE_POLL_INTERVAL.as_secs()
         );
-        std::thread::sleep(IFACE_POLL_INTERVAL);
+
+        tokio::select! {
+            // Shutdown signals: propagate as an error so main() exits cleanly.
+            _ = tokio::signal::ctrl_c() => {
+                anyhow::bail!("interrupted while waiting for interface {name}");
+            }
+            _ = sigterm.recv() => {
+                anyhow::bail!("received SIGTERM while waiting for interface {name}");
+            }
+            // Poll interval elapsed — go around the loop and re-check sysfs.
+            _ = tokio::time::sleep(IFACE_POLL_INTERVAL) => {}
+        }
     }
 }
 
@@ -71,12 +84,6 @@ pub fn load_and_attach(tunnel_iface: &str, wan_iface: &str) -> Result<Ebpf> {
 
     // Create pin directory
     std::fs::create_dir_all(BPF_PIN_PATH).context("failed to create BPF pin directory")?;
-
-    // Wait for the tunnel interface (e.g. xfrm0) to be created by the kernel.
-    // The interface only exists once the IPSec SA is established, so the daemon
-    // must poll rather than fail immediately if it starts before the first client
-    // connects.
-    wait_for_interface(tunnel_iface).context("tunnel interface not available")?;
 
     // Attach tc_ingress to the tunnel interface (xfrm0) ingress.
     // Handles client→origin direction: rewrites synthetic dst→origin and

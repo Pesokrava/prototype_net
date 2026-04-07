@@ -28,6 +28,16 @@ async fn main() -> Result<()> {
     info!("Tunnel interface: {interface_name}");
     info!("WAN interface: {wan_interface}");
 
+    // Wait indefinitely for the tunnel interface (e.g. xfrm0) to appear.
+    // xfrm0 is created by prototype-xfrm0.service; on a fresh server it exists
+    // before this service starts (systemd ordering). If it ever disappears and
+    // is recreated, BindsTo= in the service unit restarts the daemon, which
+    // will re-enter this loop and re-attach once the interface reappears.
+    // Exits early (Err) only on SIGINT / SIGTERM so the process shuts down
+    // cleanly instead of looping forever when asked to stop.
+    info!("Waiting for tunnel interface {interface_name}...");
+    loader::wait_for_interface(&interface_name).await?;
+
     // Load eBPF programs and attach to interfaces
     info!("Loading eBPF programs...");
     let mut bpf = loader::load_and_attach(&interface_name, &wan_interface)?;
@@ -65,12 +75,15 @@ async fn main() -> Result<()> {
         })
     };
 
-    info!("Daemon is running. Press Ctrl+C to stop.");
+    info!("Daemon is running. Waiting for SIGINT or SIGTERM to stop.");
 
-    // Wait for shutdown signal
-    tokio::signal::ctrl_c()
-        .await
-        .context("failed to listen for ctrl-c")?;
+    // Wait for shutdown signal (SIGINT / SIGTERM).
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .context("failed to register SIGTERM handler")?;
+    tokio::select! {
+        res = tokio::signal::ctrl_c() => res.context("failed to listen for SIGINT")?,
+        _ = sigterm.recv() => {}
+    }
 
     info!("Shutting down...");
     db_listener_handle.abort();
