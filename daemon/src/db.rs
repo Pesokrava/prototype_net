@@ -27,11 +27,7 @@ pub async fn create_pool(database_url: &str) -> Result<PgPool> {
 /// Reconnects automatically on transient errors with exponential backoff.
 /// Returns `Err` only on a fatal startup condition (initial pool creation failure),
 /// which the caller should treat as a daemon-level failure.
-pub async fn listen_for_changes(
-    database_url: &str,
-    maps: BpfMaps,
-    client_ipv6: Ipv6Addr,
-) -> Result<()> {
+pub async fn listen_for_changes(database_url: &str, maps: BpfMaps) -> Result<()> {
     let mut backoff = INITIAL_BACKOFF;
 
     loop {
@@ -42,7 +38,7 @@ pub async fn listen_for_changes(
             .context("PgListener supervisor: failed to create connection pool")?;
 
         let started_at = Instant::now();
-        match run_listener(database_url, &maps, &pool, client_ipv6).await {
+        match run_listener(database_url, &maps, &pool).await {
             Ok(()) => {
                 warn!("PgListener loop exited unexpectedly, reconnecting...");
             }
@@ -65,12 +61,7 @@ pub async fn listen_for_changes(
     }
 }
 
-async fn run_listener(
-    database_url: &str,
-    maps: &BpfMaps,
-    pool: &PgPool,
-    client_ipv6: Ipv6Addr,
-) -> Result<()> {
+async fn run_listener(database_url: &str, maps: &BpfMaps, pool: &PgPool) -> Result<()> {
     let mut listener = sqlx::postgres::PgListener::connect(database_url)
         .await
         .context("failed to connect PgListener")?;
@@ -113,15 +104,6 @@ async fn run_listener(
                 } else {
                     info!(
                         "Updated NAT_MAP: domain_id={domain_id} → origin={origin_ipv6_text}",
-                    );
-                }
-
-                // Insert into REVERSE_MAP
-                if let Err(e) = maps.insert_reverse_entry(origin, domain_id as u32, client_ipv6) {
-                    warn!("Failed to update REVERSE_MAP for domain_id={domain_id}: {e}");
-                } else {
-                    info!(
-                        "Updated REVERSE_MAP: origin={origin_ipv6_text} → domain_id={domain_id}",
                     );
                 }
             }

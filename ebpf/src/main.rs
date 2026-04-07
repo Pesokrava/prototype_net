@@ -12,7 +12,7 @@ use aya_ebpf::{
     programs::TcContext,
 };
 use aya_log_ebpf::info;
-use common::{FlowEntry, NatEntry, ReverseEntry, ServerConfig, SYNTHETIC_PREFIX};
+use common::{NatEntry, SYNTHETIC_PREFIX};
 use network_types::{
     eth::{EthHdr, EtherType},
     ip::{IpProto, Ipv6Hdr},
@@ -28,23 +28,9 @@ use network_types::{
 #[map]
 static NAT_MAP: HashMap<u32, NatEntry> = HashMap::with_max_entries(65536, 0);
 
-/// origin_ipv6 ([u8;16]) → ReverseEntry { domain_id, client_ipv6 }
-#[map]
-static REVERSE_MAP: HashMap<[u8; 16], ReverseEntry> = HashMap::with_max_entries(65536, 0);
-
-/// Index 0 → ServerConfig { server_pub_ipv6, prefix }
-#[map]
-static SERVER_CONFIG: Array<ServerConfig> = Array::with_max_entries(1, 0);
-
 /// Index 0 → xfrm0 interface index (for bpf_redirect in tc_ingress_wan)
 #[map]
 static XFRM_IFINDEX: Array<u32> = Array::with_max_entries(1, 0);
-
-/// server src_port (u16, stored as u32 key) → FlowEntry { domain_id, client_ipv6 }
-/// Populated by tc_ingress when forwarding a client packet to origin.
-/// Consumed by tc_ingress_wan to match reply packets to the correct client.
-#[map]
-static NAT_FLOWS: HashMap<u32, FlowEntry> = HashMap::with_max_entries(65536, 0);
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -138,8 +124,11 @@ fn ipv6_offset(ctx: &TcContext) -> Result<usize, ()> {
 // ---------------------------------------------------------------------------
 // TC Ingress on xfrm0 — client→origin direction
 //
-// Packets arriving from the IPSec tunnel with dst in fd00:abcd::/32.
-// Rewrite dst to the real origin IPv6, rewrite src to server's public IPv6.
+// Packets arriving from the IPSec tunnel with dst in fd00:abcd::/32 (synthetic).
+// Rewrite dst to the real origin IPv6.
+// Rewrite src to proxy_src_ipv6(client_id, domain_id) — encodes all reply
+// routing information in the source address so tc_ingress_wan can decode it
+// statelessly without any per-flow map.
 // ---------------------------------------------------------------------------
 
 #[classifier]
@@ -182,7 +171,7 @@ fn try_tc_ingress(ctx: &mut TcContext) -> Result<i32, ()> {
     // Read destination IPv6 address.
     let dst_ipv6: [u8; 16] = unsafe { (*ipv6hdr).dst_addr };
 
-    // Check prefix: fd00:abcd::/32
+    // Check prefix: fd00:abcd::/32 — only intercept synthetic destination addresses.
     if dst_ipv6[0] != SYNTHETIC_PREFIX[0]
         || dst_ipv6[1] != SYNTHETIC_PREFIX[1]
         || dst_ipv6[2] != SYNTHETIC_PREFIX[2]
@@ -204,15 +193,16 @@ fn try_tc_ingress(ctx: &mut TcContext) -> Result<i32, ()> {
         }
     };
 
-    // Load server config for src rewrite.
-    let server_cfg = SERVER_CONFIG.get(0);
-    let server_cfg = match server_cfg {
-        Some(c) => c,
-        None => return Ok(TC_ACT_SHOT),
-    };
-
-    // Save original src for checksum fixup (read before any stores).
+    // Read original src — needed for checksum fixup and for encoding client_id.
     let orig_src: [u8; 16] = unsafe { (*ipv6hdr).src_addr };
+
+    // Derive client_id from the last 2 bytes of the client VIP.
+    // Pool range fd00:abcd:0:1::0100–::ffff — bytes [14..16] hold the unique suffix.
+    let client_id = u16::from_be_bytes([orig_src[14], orig_src[15]]);
+
+    // Build stateless proxy-source address: fd00:abcd:ff00:<client_id>:<domain_id>::
+    // This encodes all reply-direction information needed by tc_ingress_wan.
+    let proxy_src = common::proxy_src_ipv6(client_id, domain_id);
 
     // Byte offsets for src/dst address fields within the packet.
     // IPv6Hdr layout: vcf(4) + payload_len(2) + next_hdr(1) + hop_limit(1) + src(16) + dst(16)
@@ -231,35 +221,15 @@ fn try_tc_ingress(ctx: &mut TcContext) -> Result<i32, ()> {
             .map_err(|_| ())?;
     }
 
-    // Rewrite src → server's public IPv6
+    // Rewrite src → proxy-source address (encodes client_id + domain_id)
     for i in 0..16 {
-        ctx.store(ipv6_src_offset + i, &server_cfg.server_pub_ipv6[i], 0)
+        ctx.store(ipv6_src_offset + i, &proxy_src[i], 0)
             .map_err(|_| ())?;
     }
 
     // Incremental L4 checksum updates.
-    update_addr_csum(ctx, csum_offset, &orig_src, &server_cfg.server_pub_ipv6)?;
+    update_addr_csum(ctx, csum_offset, &orig_src, &proxy_src)?;
     update_addr_csum(ctx, csum_offset, &dst_ipv6, &nat_entry.origin_ipv6)?;
-
-    // Record this flow in NAT_FLOWS so tc_ingress_wan can match the reply.
-    // Key: src_port (after kernel assigned it, this is the port Google sees as dst).
-    let src_port = match nexthdr {
-        IpProto::Tcp => {
-            let tcphdr: *const TcpHdr = unsafe { ptr_at(ctx, l4_base)? };
-            u16::from_be_bytes(unsafe { (*tcphdr).source })
-        }
-        _ => {
-            let udphdr: *const UdpHdr = unsafe { ptr_at(ctx, l4_base)? };
-            u16::from_be_bytes(unsafe { (*udphdr).src })
-        }
-    };
-    let flow = FlowEntry {
-        domain_id,
-        _pad: 0,
-        client_ipv6: orig_src,
-    };
-    // Store keyed by src_port (widened to u32 to satisfy BPF map key size).
-    let _ = NAT_FLOWS.insert(&(src_port as u32), &flow, 0);
 
     info!(ctx, "tc_ingress: rewrote domain_id={}", domain_id);
 
@@ -270,10 +240,15 @@ fn try_tc_ingress(ctx: &mut TcContext) -> Result<i32, ()> {
 // TC Ingress on WAN interface (e.g. enp0s3) — origin→client direction
 //
 // Reply packets arriving from origin servers on the WAN interface.
-// If src matches a known origin in REVERSE_MAP, rewrite:
+// If dst is a proxy-source address (byte 4 == 0xff), decode client_id and
+// domain_id from it, reconstruct client VIP, verify src against NAT_MAP,
+// then rewrite:
 //   src → synthetic IPv6 (fd00:abcd:XXXX:YYYY::1)
-//   dst → client's IPv6
+//   dst → client VIP (fd00:abcd:0:1::<client_id>)
 // Then redirect to xfrm0 (which will encrypt via IPSec and deliver to client).
+//
+// No per-flow state is needed — all routing information is decoded from the
+// packet's destination address (the proxy-source written by tc_ingress).
 // ---------------------------------------------------------------------------
 
 #[classifier]
@@ -311,40 +286,36 @@ fn try_tc_ingress_wan(ctx: &mut TcContext) -> Result<i32, ()> {
         }
     }
 
-    // Read destination port — this is the server-side src port of the original
-    // outbound flow (stored in NAT_FLOWS by tc_ingress).
-    let dst_port = match nexthdr {
-        IpProto::Tcp => {
-            let tcphdr: *const TcpHdr = unsafe { ptr_at(ctx, l4_base)? };
-            u16::from_be_bytes(unsafe { (*tcphdr).dest })
-        }
-        _ => {
-            let udphdr: *const UdpHdr = unsafe { ptr_at(ctx, l4_base)? };
-            u16::from_be_bytes(unsafe { (*udphdr).dst })
-        }
-    };
+    // Read destination IPv6 address — this is the proxy-source address written
+    // by tc_ingress, encoding client_id + domain_id in-packet.
+    let dst_ipv6: [u8; 16] = unsafe { (*ipv6hdr).dst_addr };
 
-    // Look up this reply flow by dst_port in NAT_FLOWS.
-    let flow_entry = unsafe { NAT_FLOWS.get(&(dst_port as u32)) };
-    let flow_entry = match flow_entry {
-        Some(e) => e,
-        None => return Ok(TC_ACT_OK), // not a tracked NAT flow, pass through
-    };
-
-    // Read source IPv6 address and verify it is known in REVERSE_MAP.
-    // This double-check ensures we don't accidentally intercept unrelated traffic
-    // that happens to use the same dst_port.
-    let src_ipv6: [u8; 16] = unsafe { (*ipv6hdr).src_addr };
-    let rev_entry = unsafe { REVERSE_MAP.get(&src_ipv6) };
-    if rev_entry.is_none() {
+    // Check proxy-source marker (byte 4 == 0xff). If not present, pass through.
+    if !common::is_proxy_src(&dst_ipv6) {
         return Ok(TC_ACT_OK);
     }
 
-    // Save original dst for checksum fixup (read before any stores).
-    let orig_dst: [u8; 16] = unsafe { (*ipv6hdr).dst_addr };
+    // Decode client_id and domain_id from the proxy-source address.
+    let (client_id, domain_id) = common::decode_proxy_src(&dst_ipv6);
 
-    // Build synthetic IPv6 from domain_id.
-    let synthetic = common::synthetic_ipv6(flow_entry.domain_id);
+    // Reconstruct client VIP: fd00:abcd:0:1::<client_id>
+    let client_ipv6 = common::client_vip_from_id(client_id);
+
+    // Read source IPv6 address and verify it matches the known origin in NAT_MAP.
+    // This guards against accidentally intercepting unrelated traffic destined to
+    // an address that happens to have byte 4 == 0xff.
+    let src_ipv6: [u8; 16] = unsafe { (*ipv6hdr).src_addr };
+    let nat_entry = unsafe { NAT_MAP.get(&domain_id) };
+    let nat_entry = match nat_entry {
+        Some(e) => e,
+        None => return Ok(TC_ACT_OK), // unknown domain, pass through
+    };
+    if src_ipv6 != nat_entry.origin_ipv6 {
+        return Ok(TC_ACT_OK); // src does not match expected origin, pass through
+    }
+
+    // Build synthetic IPv6 from domain_id for the src rewrite.
+    let synthetic = common::synthetic_ipv6(domain_id);
 
     // Byte offsets for src/dst address fields within the packet.
     let ipv6_src_offset = ip_off + 8;
@@ -362,15 +333,15 @@ fn try_tc_ingress_wan(ctx: &mut TcContext) -> Result<i32, ()> {
             .map_err(|_| ())?;
     }
 
-    // Rewrite dst → client IPv6
+    // Rewrite dst → client VIP
     for i in 0..16 {
-        ctx.store(ipv6_dst_offset + i, &flow_entry.client_ipv6[i], 0)
+        ctx.store(ipv6_dst_offset + i, &client_ipv6[i], 0)
             .map_err(|_| ())?;
     }
 
     // Incremental L4 checksum updates (bpf_csum_diff-based, endian-safe).
     update_addr_csum(ctx, csum_offset, &src_ipv6, &synthetic)?;
-    update_addr_csum(ctx, csum_offset, &orig_dst, &flow_entry.client_ipv6)?;
+    update_addr_csum(ctx, csum_offset, &dst_ipv6, &client_ipv6)?;
 
     // Mark the checksum as CHECKSUM_PARTIAL so the kernel recomputes it on
     // xfrm0 egress.  WAN-ingress packets often arrive with ip_summed =
@@ -395,7 +366,7 @@ fn try_tc_ingress_wan(ctx: &mut TcContext) -> Result<i32, ()> {
 
     info!(
         ctx,
-        "tc_ingress_wan: rewrote domain_id={}, redirecting to xfrm0", flow_entry.domain_id
+        "tc_ingress_wan: rewrote domain_id={}, redirecting to xfrm0", domain_id
     );
 
     // Redirect to xfrm0 egress so it goes through the IPSec tunnel to the client.

@@ -14,35 +14,6 @@ pub struct NatEntry {
     pub origin_ipv6: [u8; 16],
 }
 
-/// REVERSE_MAP value: maps origin IPv6 → (domain_id, client IPv6).
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct ReverseEntry {
-    pub domain_id: u32,
-    pub _pad: u32,
-    pub client_ipv6: [u8; 16],
-}
-
-/// SERVER_CONFIG array value: server's own public IPv6 + synthetic prefix.
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct ServerConfig {
-    pub server_pub_ipv6: [u8; 16],
-    pub prefix: [u8; 16],
-}
-
-/// NAT_FLOWS value: tracks an active NAT'd TCP/UDP flow by server-side src port.
-///
-/// Keyed by `u16` src port (the port the server uses when forwarding to origin).
-/// Looked up by `tc_ingress_wan` using the reply packet's dst port.
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct FlowEntry {
-    pub domain_id: u32,
-    pub _pad: u32,
-    pub client_ipv6: [u8; 16],
-}
-
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -86,18 +57,63 @@ pub fn synthetic_ipv6(domain_id: u32) -> [u8; 16] {
     ]
 }
 
+/// Construct a proxy-source IPv6 address encoding client_id and domain_id.
+///
+/// Layout (16 bytes):
+///   bytes 0–3  : `fd 00 ab cd`  (ULA /32 prefix)
+///   byte  4    : `0xff`         (proxy-source marker)
+///   byte  5    : `0x00`         (reserved)
+///   bytes 6–7  : client_id (u16 BE)
+///   bytes 8–11 : domain_id (u32 BE)
+///   bytes 12–15: `0x00 00 00 00`
+///
+/// Example: client_id=0x0101, domain_id=7 → fd00:abcd:ff00:101:0:7::
+pub fn proxy_src_ipv6(client_id: u16, domain_id: u32) -> [u8; 16] {
+    let cid = client_id.to_be_bytes();
+    let did = domain_id.to_be_bytes();
+    [
+        0xfd, 0x00, 0xab, 0xcd, // bytes 0–3: prefix
+        0xff, 0x00, // bytes 4–5: marker + reserved
+        cid[0], cid[1], // bytes 6–7: client_id
+        did[0], did[1], did[2], did[3], // bytes 8–11: domain_id
+        0x00, 0x00, 0x00, 0x00, // bytes 12–15: zero
+    ]
+}
+
+/// Return true if `addr` is a proxy-source address (byte 4 == 0xff).
+#[inline(always)]
+pub fn is_proxy_src(addr: &[u8; 16]) -> bool {
+    addr[4] == 0xff
+}
+
+/// Decode `client_id` and `domain_id` from a proxy-source address.
+///
+/// Caller must verify `is_proxy_src()` first.
+#[inline(always)]
+pub fn decode_proxy_src(addr: &[u8; 16]) -> (u16, u32) {
+    let client_id = u16::from_be_bytes([addr[6], addr[7]]);
+    let domain_id = u32::from_be_bytes([addr[8], addr[9], addr[10], addr[11]]);
+    (client_id, domain_id)
+}
+
+/// Reconstruct the client VIP (`fd00:abcd:0:1::<client_id>`) from a `client_id`.
+///
+/// Mirrors the strongSwan pool range `::0100–::ffff`.
+pub fn client_vip_from_id(client_id: u16) -> [u8; 16] {
+    let cid = client_id.to_be_bytes();
+    [
+        0xfd, 0x00, 0xab, 0xcd, // bytes 0–3: prefix
+        0x00, 0x00, // bytes 4–5: zero
+        0x00, 0x01, // bytes 6–7: :0:1 segment
+        0x00, 0x00, 0x00, 0x00, // bytes 8–11: zero
+        0x00, 0x00, // bytes 12–13: zero
+        cid[0], cid[1], // bytes 14–15: client_id
+    ]
+}
+
 // ---------------------------------------------------------------------------
 // Userspace-only: aya::Pod implementations
 // ---------------------------------------------------------------------------
 
 #[cfg(feature = "userspace")]
 unsafe impl aya::Pod for NatEntry {}
-
-#[cfg(feature = "userspace")]
-unsafe impl aya::Pod for ReverseEntry {}
-
-#[cfg(feature = "userspace")]
-unsafe impl aya::Pod for ServerConfig {}
-
-#[cfg(feature = "userspace")]
-unsafe impl aya::Pod for FlowEntry {}

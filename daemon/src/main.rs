@@ -1,5 +1,3 @@
-use std::net::Ipv6Addr;
-
 use anyhow::{Context, Result};
 use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
@@ -25,27 +23,14 @@ async fn main() -> Result<()> {
         std::env::var("INTERFACE_NAME").context("INTERFACE_NAME environment variable not set")?;
     let wan_interface =
         std::env::var("WAN_INTERFACE").context("WAN_INTERFACE environment variable not set")?;
-    let server_ipv6_str =
-        std::env::var("SERVER_IPV6").context("SERVER_IPV6 environment variable not set")?;
-    let client_ipv6_str =
-        std::env::var("CLIENT_IPV6").context("CLIENT_IPV6 environment variable not set")?;
-
-    let server_ipv6: Ipv6Addr = server_ipv6_str
-        .parse()
-        .context("SERVER_IPV6 is not a valid IPv6 address")?;
-    let client_ipv6: Ipv6Addr = client_ipv6_str
-        .parse()
-        .context("CLIENT_IPV6 is not a valid IPv6 address")?;
 
     info!("Starting daemon");
     info!("Tunnel interface: {interface_name}");
     info!("WAN interface: {wan_interface}");
-    info!("Server IPv6: {server_ipv6}");
-    info!("Client IPv6: {client_ipv6}");
 
     // Load eBPF programs and attach to interfaces
     info!("Loading eBPF programs...");
-    let mut bpf = loader::load_and_attach(&interface_name, &wan_interface, server_ipv6)?;
+    let mut bpf = loader::load_and_attach(&interface_name, &wan_interface)?;
 
     // Connect to database
     info!("Connecting to database...");
@@ -53,7 +38,7 @@ async fn main() -> Result<()> {
 
     // Bulk-load all existing domain mappings into BPF maps
     info!("Bulk-loading existing domain mappings into BPF maps...");
-    let count = maps::bulk_load_from_db(&mut bpf, &db_pool, client_ipv6).await?;
+    let count = maps::bulk_load_from_db(&mut bpf, &db_pool).await?;
     info!("Loaded {count} domain mappings into BPF maps");
 
     // Spawn LISTEN/NOTIFY handler
@@ -62,7 +47,7 @@ async fn main() -> Result<()> {
         let db_url = database_url.clone();
         let maps = bpf_maps.clone();
         async move {
-            if let Err(e) = db::listen_for_changes(&db_url, maps, client_ipv6).await {
+            if let Err(e) = db::listen_for_changes(&db_url, maps).await {
                 // listen_for_changes only returns Err on a fatal startup condition
                 // (pool creation failure). Panic so the process exits visibly rather
                 // than running silently deaf to all domain changes.
@@ -76,7 +61,7 @@ async fn main() -> Result<()> {
         let pool = db_pool.clone();
         let maps = bpf_maps;
         tokio::spawn(async move {
-            resolver::run_periodic_resolver(pool, maps, client_ipv6).await;
+            resolver::run_periodic_resolver(pool, maps).await;
         })
     };
 

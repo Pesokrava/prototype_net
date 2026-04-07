@@ -1,5 +1,3 @@
-use std::net::Ipv6Addr;
-
 use anyhow::{Context, Result};
 use sqlx::PgPool;
 use tracing::{info, warn};
@@ -10,19 +8,19 @@ use crate::maps::BpfMaps;
 ///
 /// Every 60 seconds, re-resolves each domain and updates the database + BPF maps
 /// if the origin IPv6 has changed.
-pub async fn run_periodic_resolver(pool: PgPool, maps: BpfMaps, client_ipv6: Ipv6Addr) {
+pub async fn run_periodic_resolver(pool: PgPool, maps: BpfMaps) {
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
 
     loop {
         interval.tick().await;
 
-        if let Err(e) = resolve_all(&pool, &maps, client_ipv6).await {
+        if let Err(e) = resolve_all(&pool, &maps).await {
             warn!("Periodic re-resolution error: {e}");
         }
     }
 }
 
-async fn resolve_all(pool: &PgPool, maps: &BpfMaps, client_ipv6: Ipv6Addr) -> Result<()> {
+async fn resolve_all(pool: &PgPool, maps: &BpfMaps) -> Result<()> {
     // (domain_id, domain, origin_ipv6_text)
     let rows: Vec<(i32, String, String)> = sqlx::query_as(
         r#"SELECT domain_id, domain, host(origin_ipv6)::text FROM domains"#,
@@ -63,9 +61,6 @@ async fn resolve_all(pool: &PgPool, maps: &BpfMaps, client_ipv6: Ipv6Addr) -> Re
 
                         // Update BPF NAT_MAP
                         maps.insert_nat_entry(domain_id as u32, new_ip)?;
-
-                        // Update BPF REVERSE_MAP
-                        maps.insert_reverse_entry(new_ip, domain_id as u32, client_ipv6)?;
                     }
                 }
             }

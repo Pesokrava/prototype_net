@@ -4,20 +4,28 @@ This directory contains the Linux kernel-side eBPF programs that perform NAT66 (
 
 ## How It Works
 
-Two TC classifier programs perform bidirectional address rewriting:
+Two TC classifier programs perform bidirectional address rewriting using a **stateless** proxy-source address encoding scheme. No per-flow state is needed — all reply routing information is encoded into the source address written toward the origin server.
 
 - **`tc_ingress`** (client→origin, attached to `xfrm0` ingress): Intercepts outbound packets
   destined for synthetic `fd00:abcd::/32` addresses. Extracts the `domain_id` from the
-  destination, looks up the real origin IPv6 in `NAT_MAP`, rewrites the destination to the
-  real origin and the source to the server's public IPv6. Records the server-side source port
-  in `NAT_FLOWS` so the reply direction can match the flow.
+  destination and looks up the real origin IPv6 in `NAT_MAP`. Derives `client_id` from the
+  last 2 bytes of the client VIP. Rewrites:
+  - `dst` → real origin IPv6 (from `NAT_MAP`)
+  - `src` → `proxy_src_ipv6(client_id, domain_id)` — a `fd00:abcd:ff00:...` address that
+    encodes both values so any VM can decode the reply statelessly
+
+  No flow table is written. The encoded source address carries all necessary return-path information.
 
 - **`tc_ingress_wan`** (origin→client, attached to WAN interface `enp0s3` ingress): Intercepts
-  reply packets arriving from origin servers. Matches on the destination port (the
-  server-side ephemeral port stored in `NAT_FLOWS` by `tc_ingress`) and cross-checks the
-  source IPv6 against `REVERSE_MAP` to avoid stealing the server's own connections. Rewrites
-  the source to the synthetic IPv6 and the destination to the client's IPv6, then redirects
-  the packet to `xfrm0` egress for IPSec encapsulation back to the client.
+  reply packets arriving from origin servers. Detects proxy-source destination addresses by
+  checking byte 4 == `0xff`. Decodes `client_id` and `domain_id` directly from the packet's
+  destination address, verifies the source IPv6 matches `NAT_MAP[domain_id].origin_ipv6` as a
+  guard against unrelated traffic, then rewrites:
+  - `src` → synthetic IPv6 (`fd00:abcd:XXXX:YYYY::1` for the domain)
+  - `dst` → client VIP (`fd00:abcd:0:1::<client_id>`)
+
+  Then redirects to `xfrm0` egress for IPSec encapsulation back to the client. Zero per-flow
+  map lookups are needed for routing — only 1 `NAT_MAP` lookup for the origin guard.
 
 Both programs auto-detect whether the packet has an Ethernet header or is raw IPv6 (as on
 `xfrm0`, an `ARPHRD_NONE` device) via the `ipv6_offset()` helper.
@@ -30,22 +38,19 @@ offload (`CHECKSUM_COMPLETE`) on WAN ingress.
 
 ## BPF Maps
 
-Five BPF maps are defined here and populated by the userspace `daemon/`:
+Two BPF maps are defined here and populated by the userspace `daemon/`:
 
 | Map | Type | Key | Value | Max Entries |
 |-----|------|-----|-------|-------------|
 | `NAT_MAP` | HashMap | `u32` (domain_id) | `NatEntry` | 65536 |
-| `REVERSE_MAP` | HashMap | `[u8; 16]` (origin IPv6) | `ReverseEntry` | 65536 |
-| `SERVER_CONFIG` | Array | index 0 | `ServerConfig` | 1 |
 | `XFRM_IFINDEX` | Array | index 0 | `u32` (ifindex) | 1 |
-| `NAT_FLOWS` | HashMap | `u32` (src port) | `FlowEntry` | 65536 |
 
 `XFRM_IFINDEX` holds the kernel interface index of `xfrm0`, written by the daemon at startup,
 used by `tc_ingress_wan` for `bpf_redirect`.
 
-`NAT_FLOWS` is written by `tc_ingress` and read by `tc_ingress_wan`. It maps the server-side
-ephemeral source port to the corresponding `domain_id` and `client_ipv6`, enabling 5-tuple
-flow matching in the reply direction.
+`NAT_MAP` is the only map consulted at packet-processing time. It is used by `tc_ingress` to
+resolve the origin IPv6 for a domain, and by `tc_ingress_wan` as an origin-guard to avoid
+intercepting unrelated traffic.
 
 ## Build Requirements
 
@@ -62,7 +67,8 @@ flow matching in the reply direction.
   byte-offset constants with verified struct definitions and enums, eliminating the class of
   bug where a wrong offset silently reads the wrong byte. Packet header access uses
   bounds-checked pointer casting (`ptr_at` helper) rather than `ctx.load()`.
-- `common` (local) -- shared `NatEntry`, `ReverseEntry`, `ServerConfig`, `FlowEntry` types.
+- `common` (local) -- shared `NatEntry` type and address helpers (`proxy_src_ipv6`,
+  `is_proxy_src`, `decode_proxy_src`, `client_vip_from_id`, `synthetic_ipv6`).
 
 ## Conventions
 
@@ -76,4 +82,6 @@ flow matching in the reply direction.
 - Checksum updates for IPv6 address fields must use `bpf_csum_diff` (not `l4_csum_replace`
   size=2/4), which is endian-correct for 16-byte address replacements.
 - The panic handler is an infinite loop (required for no_std eBPF targets).
-- Shared types come from the `common/` crate (no_std, no `userspace` feature).
+- Shared types and helpers come from the `common/` crate (no_std, no `userspace` feature).
+- **No per-flow state**: `tc_ingress` must never write to any flow table. All reply-direction
+  routing information must be derivable solely from the proxy-source address in the packet.

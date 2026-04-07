@@ -20,7 +20,6 @@ services:
     environment:
       DNS_SERVER: ${SERVER_VM_IP}
       SERVER_IP: ${SERVER_VM_IP}
-      CLIENT_IPV6: ${CLIENT_IPV6:-fd00:abcd:0:1::2}
     volumes:
       - ./certs/output:/certs:ro
     networks:

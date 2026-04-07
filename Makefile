@@ -57,7 +57,7 @@ LIMA            = limactl shell $(DEV_VM_NAME)
 # ---------------------------------------------------------------------------
 
 .PHONY: help dev-up dev-shell dev-build dev-build-ebpf dev-down dev-destroy \
-        certs \
+        certs client-cert \
         vm-up vm-provision vm-ip vm-down vm-ssh \
         postgres-up postgres-down \
         deploy deploy-bins deploy-certs deploy-units \
@@ -82,7 +82,8 @@ help:
 	@echo "    dev-destroy    Permanently delete the build VM"
 	@echo ""
 	@echo "  Certificates  (runs on macOS)"
-	@echo "    certs          Generate TLS certificates  (requires SERVER_VM_IP in .env)"
+	@echo "    certs          Generate CA + server + test-client cert  (requires SERVER_VM_IP)"
+	@echo "    client-cert    Generate a per-client cert + bundle  (requires CLIENT_ID)"
 	@echo ""
 	@echo "  Server VM  (Terraform from local machine)"
 	@echo "    vm-up          Provision server VM with Terraform"
@@ -171,6 +172,14 @@ certs:
 	@echo "==> Generating TLS certificates for $(SERVER_VM_IP)..."
 	./certs/gen-certs.sh $(SERVER_VM_IP)
 
+# Generate a per-client certificate + JSON bundle.
+# Usage: make client-cert CLIENT_ID=macbook-alice
+# Requires: make certs must have been run first (CA must exist).
+client-cert:
+	$(call require,CLIENT_ID)
+	@echo "==> Generating client certificate + bundle for '$(CLIENT_ID)'..."
+	./certs/gen-client.sh $(CLIENT_ID)
+
 # ---------------------------------------------------------------------------
 # VM
 # ---------------------------------------------------------------------------
@@ -230,7 +239,6 @@ vm-provision:
 		-e postgres_password=$(TF_VAR_postgres_password) \
 		-e host_bridge_ip=$(TF_VAR_host_bridge_ip) \
 		-e server_ipv6=$(TF_VAR_server_ipv6) \
-		-e client_ipv6=$(CLIENT_IPV6) \
 		-e dns_listen_addr=$(TF_VAR_dns_listen_addr) \
 		ansible/site.yml
 	@echo ""
@@ -314,15 +322,14 @@ deploy-units:
 	$(call require,TF_VAR_postgres_password)
 	$(call require,TF_VAR_host_bridge_ip)
 	$(call require,TF_VAR_server_ipv6)
-	$(call require,CLIENT_IPV6)
 	$(call require,TF_VAR_dns_listen_addr)
 	@echo "==> Deploying systemd units to VM..."
 	@printf '[Unit]\nDescription=Create xfrm0 XFRM interface for prototype_net\nAfter=network-online.target\nWants=network-online.target\nPartOf=network-online.target\n\n[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/bin/sh -c '"'"'ip link show xfrm0 >/dev/null 2>&1 || ip link add xfrm0 type xfrm if_id 1 dev enp0s3'"'"'\nExecStart=/sbin/ip link set xfrm0 up\n\n[Install]\nWantedBy=multi-user.target\n' \
 		| $(SSH) 'sudo tee /etc/systemd/system/prototype-xfrm0.service > /dev/null'
 	@printf '[Unit]\nDescription=Load strongSwan swanctl connections after charon starts\nAfter=strongswan-starter.service\nBindsTo=strongswan-starter.service\nPartOf=strongswan-starter.service\n\n[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStartPre=/bin/sh -c '"'"'for i in $$(seq 1 20); do test -S /var/run/charon.vici && break; sleep 1; done'"'"'\nExecStart=/usr/sbin/swanctl --load-all\nRestart=on-failure\nRestartSec=3\n\n[Install]\nWantedBy=multi-user.target\n' \
 		| $(SSH) 'sudo tee /etc/systemd/system/prototype-swanctl-load.service > /dev/null'
-	@printf '[Unit]\nDescription=prototype_net eBPF daemon\nAfter=network-online.target strongswan-starter.service prototype-xfrm0.service\nWants=network-online.target\nBindsTo=prototype-xfrm0.service\n\n[Service]\nType=simple\nExecStart=/opt/prototype_net/daemon\nEnvironment=DATABASE_URL=postgres://prototype:%s@%s:5432/prototype_net\nEnvironment=INTERFACE_NAME=xfrm0\nEnvironment=WAN_INTERFACE=enp0s3\nEnvironment=SERVER_IPV6=%s\nEnvironment=CLIENT_IPV6=%s\nRestart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy=multi-user.target\n' \
-		'$(TF_VAR_postgres_password)' '$(TF_VAR_host_bridge_ip)' '$(TF_VAR_server_ipv6)' '$(CLIENT_IPV6)' \
+	@printf '[Unit]\nDescription=prototype_net eBPF daemon\nAfter=network-online.target strongswan-starter.service prototype-xfrm0.service\nWants=network-online.target\nBindsTo=prototype-xfrm0.service\n\n[Service]\nType=simple\nExecStart=/opt/prototype_net/daemon\nEnvironment=DATABASE_URL=postgres://prototype:%s@%s:5432/prototype_net\nEnvironment=INTERFACE_NAME=xfrm0\nEnvironment=WAN_INTERFACE=enp0s3\nRestart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy=multi-user.target\n' \
+		'$(TF_VAR_postgres_password)' '$(TF_VAR_host_bridge_ip)' \
 		| $(SSH) 'sudo tee /etc/systemd/system/prototype-daemon.service > /dev/null'
 	@printf '[Unit]\nDescription=prototype_net DNS server\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart=/opt/prototype_net/dns-server\nEnvironment=DATABASE_URL=postgres://prototype:%s@%s:5432/prototype_net\nEnvironment=LISTEN_ADDR=%s:53\nRestart=on-failure\nRestartSec=5\nAmbientCapabilities=CAP_NET_BIND_SERVICE\n\n[Install]\nWantedBy=multi-user.target\n' \
 		'$(TF_VAR_postgres_password)' '$(TF_VAR_host_bridge_ip)' '$(TF_VAR_dns_listen_addr)' \
@@ -353,7 +360,7 @@ deploy-certs:
 
 client-up:
 	$(call require,SERVER_VM_IP)
-	@test -f $(CERT_DIR)/client.crt || (echo "ERROR: client certs not found — run: make certs" && exit 1)
+	@test -f $(CERT_DIR)/client-test-client.crt || (echo "ERROR: client certs not found — run: make certs" && exit 1)
 	@echo "==> Starting test client..."
 	docker compose up -d --no-deps client
 	@echo "==> Waiting for tunnel to establish..."
@@ -366,7 +373,7 @@ client-up:
 
 client-up-mac:
 	$(call require,SERVER_VM_IP)
-	@test -f $(CERT_DIR)/client.crt || (echo "ERROR: client certs not found — run: make certs" && exit 1)
+	@test -f $(CERT_DIR)/client-test-client.crt || (echo "ERROR: client certs not found — run: make certs" && exit 1)
 	@echo "==> Starting test client (macOS)..."
 	docker compose up -d --no-deps client
 	@echo "==> Waiting for tunnel to establish..."

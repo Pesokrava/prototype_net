@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use aya::maps::hash_map::HashMap as BpfHashMap;
 use aya::maps::IterableMap;
 use aya::Ebpf;
-use common::{NatEntry, ReverseEntry};
+use common::NatEntry;
 use sqlx::PgPool;
 use tracing::info;
 
@@ -18,7 +18,6 @@ pub struct BpfMaps {
 
 struct BpfMapsInner {
     nat_map_fd: i32,
-    reverse_map_fd: i32,
 }
 
 impl BpfMaps {
@@ -32,17 +31,9 @@ impl BpfMaps {
             BpfHashMap::try_from(nat_map).context("failed to cast NAT_MAP")?;
         let nat_fd = nat_ref.map().fd().as_fd().as_raw_fd();
 
-        let reverse_map = bpf
-            .map("REVERSE_MAP")
-            .context("REVERSE_MAP not found")?;
-        let reverse_ref: BpfHashMap<&aya::maps::MapData, [u8; 16], ReverseEntry> =
-            BpfHashMap::try_from(reverse_map).context("failed to cast REVERSE_MAP")?;
-        let reverse_fd = reverse_ref.map().fd().as_fd().as_raw_fd();
-
         Ok(Self {
             inner: Arc::new(Mutex::new(BpfMapsInner {
                 nat_map_fd: nat_fd,
-                reverse_map_fd: reverse_fd,
             })),
         })
     }
@@ -67,33 +58,6 @@ impl BpfMaps {
         Ok(())
     }
 
-    /// Insert a reverse mapping: origin IPv6 → (domain_id, client IPv6).
-    pub fn insert_reverse_entry(
-        &self,
-        origin_ipv6: Ipv6Addr,
-        domain_id: u32,
-        client_ipv6: Ipv6Addr,
-    ) -> Result<()> {
-        let inner = self.inner.lock().unwrap();
-        let key = origin_ipv6.octets();
-        let entry = ReverseEntry {
-            domain_id,
-            _pad: 0,
-            client_ipv6: client_ipv6.octets(),
-        };
-
-        use std::os::fd::BorrowedFd;
-        let fd = unsafe { BorrowedFd::borrow_raw(inner.reverse_map_fd) };
-        let map_data = aya::maps::MapData::from_fd(fd.try_clone_to_owned()?)
-            .context("failed to open REVERSE_MAP from fd")?;
-        let mut map: BpfHashMap<_, [u8; 16], ReverseEntry> =
-            BpfHashMap::try_from(aya::maps::Map::HashMap(map_data))
-                .context("failed to cast REVERSE_MAP")?;
-        map.insert(key, entry, 0)
-            .context("failed to insert into REVERSE_MAP")?;
-        Ok(())
-    }
-
     /// Remove entries for a given domain_id from NAT_MAP.
     pub fn remove_nat_entry(&self, domain_id: u32) -> Result<()> {
         let inner = self.inner.lock().unwrap();
@@ -110,7 +74,7 @@ impl BpfMaps {
 }
 
 /// Bulk-load all domain mappings from the database into BPF maps.
-pub async fn bulk_load_from_db(bpf: &mut Ebpf, pool: &PgPool, client_ipv6: Ipv6Addr) -> Result<usize> {
+pub async fn bulk_load_from_db(bpf: &mut Ebpf, pool: &PgPool) -> Result<usize> {
     // (domain_id, origin_ipv6_text, synthetic_ipv6_text)
     let rows: Vec<(i32, String, String)> = sqlx::query_as(
         r#"SELECT domain_id, host(origin_ipv6)::text, host(synthetic_ipv6)::text FROM domains"#,
@@ -140,23 +104,5 @@ pub async fn bulk_load_from_db(bpf: &mut Ebpf, pool: &PgPool, client_ipv6: Ipv6A
     }
 
     info!("Bulk-loaded {count} entries into NAT_MAP");
-
-    // Also populate REVERSE_MAP (origin_ipv6 → domain_id + client_ipv6)
-    let reverse_map_data = bpf.map_mut("REVERSE_MAP").context("REVERSE_MAP not found")?;
-    let mut reverse_map: BpfHashMap<&mut aya::maps::MapData, [u8; 16], ReverseEntry> =
-        BpfHashMap::try_from(reverse_map_data).context("failed to cast REVERSE_MAP")?;
-    for (domain_id, origin_ipv6_text, _synthetic) in &rows {
-        let origin: Ipv6Addr = origin_ipv6_text.parse().context("invalid origin_ipv6")?;
-        let entry = ReverseEntry {
-            domain_id: *domain_id as u32,
-            _pad: 0,
-            client_ipv6: client_ipv6.octets(),
-        };
-        reverse_map
-            .insert(origin.octets(), entry, 0)
-            .context("failed to insert into REVERSE_MAP during bulk load")?;
-    }
-
-    info!("Bulk-loaded {count} entries into REVERSE_MAP");
     Ok(count)
 }

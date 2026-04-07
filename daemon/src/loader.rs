@@ -1,11 +1,9 @@
-use std::net::Ipv6Addr;
 use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use aya::programs::{tc, SchedClassifier, TcAttachType};
 use aya::{include_bytes_aligned, Ebpf};
-use common::ServerConfig;
 use tracing::info;
 
 /// Path where BPF maps are pinned for persistence.
@@ -54,7 +52,7 @@ fn ifindex(name: &str) -> Result<u32> {
 ///
 /// - `tunnel_iface`: xfrm0 — client→origin ingress NAT
 /// - `wan_iface`: enp0s3 — origin→client reply rewrite + redirect to tunnel
-pub fn load_and_attach(tunnel_iface: &str, wan_iface: &str, server_ipv6: Ipv6Addr) -> Result<Ebpf> {
+pub fn load_and_attach(tunnel_iface: &str, wan_iface: &str) -> Result<Ebpf> {
     // The eBPF ELF is embedded at compile time.
     // include_bytes_aligned! ensures the data has at least 32-byte alignment,
     // which satisfies the alignment requirements of the `object` crate's ELF
@@ -81,7 +79,8 @@ pub fn load_and_attach(tunnel_iface: &str, wan_iface: &str, server_ipv6: Ipv6Add
     wait_for_interface(tunnel_iface).context("tunnel interface not available")?;
 
     // Attach tc_ingress to the tunnel interface (xfrm0) ingress.
-    // Handles client→origin direction: rewrites synthetic dst→origin and src→server_pub.
+    // Handles client→origin direction: rewrites synthetic dst→origin and
+    // src→proxy_src_ipv6(client_id, domain_id) for stateless reply routing.
     let _ = tc::qdisc_add_clsact(tunnel_iface);
     let ingress: &mut SchedClassifier = bpf
         .program_mut("tc_ingress")
@@ -95,7 +94,8 @@ pub fn load_and_attach(tunnel_iface: &str, wan_iface: &str, server_ipv6: Ipv6Add
     info!("Attached tc_ingress to {tunnel_iface}");
 
     // Attach tc_ingress_wan to the WAN interface (enp0s3) ingress.
-    // Handles origin→client direction: rewrites reply src→synthetic, dst→client_IPv6,
+    // Handles origin→client direction: decodes proxy-source dst addr to recover
+    // client_id + domain_id, rewrites reply src→synthetic, dst→client_VIP,
     // then redirects to xfrm0 egress for IPSec encapsulation back to the client.
     let _ = tc::qdisc_add_clsact(wan_iface);
     let ingress_wan: &mut SchedClassifier = bpf
@@ -124,23 +124,6 @@ pub fn load_and_attach(tunnel_iface: &str, wan_iface: &str, server_ipv6: Ipv6Add
         .set(0, xfrm_idx, 0)
         .context("failed to write XFRM_IFINDEX[0]")?;
     info!("Wrote XFRM_IFINDEX[0] = {xfrm_idx} ({tunnel_iface})");
-
-    // Write SERVER_CONFIG[0]
-    let mut server_config_map: aya::maps::Array<&mut aya::maps::MapData, ServerConfig> =
-        aya::maps::Array::try_from(
-            bpf.map_mut("SERVER_CONFIG")
-                .context("SERVER_CONFIG map not found")?,
-        )
-        .context("failed to open SERVER_CONFIG as Array")?;
-
-    let config = ServerConfig {
-        server_pub_ipv6: server_ipv6.octets(),
-        prefix: [0xfd, 0x00, 0xab, 0xcd, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-    };
-    server_config_map
-        .set(0, config, 0)
-        .context("failed to write SERVER_CONFIG[0]")?;
-    info!("Wrote SERVER_CONFIG[0] with server IPv6: {server_ipv6}");
 
     Ok(bpf)
 }

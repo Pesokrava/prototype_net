@@ -94,11 +94,17 @@
   copy:
     dest: /etc/swanctl/conf.d/prototype.conf
     content: |
+      pools {
+          client_pool {
+              addrs = fd00:abcd:0:1::100-fd00:abcd:0:1::ffff
+          }
+      }
       connections {
           prototype {
               version = 2
               proposals = aes256-sha256-ecp384
               rekey_time = 4h
+              pools = client_pool
               local {
                   auth = pubkey
                   certs = server.crt
@@ -189,8 +195,6 @@
       Environment=DATABASE_URL=postgres://prototype:{{ postgres_password }}@{{ host_bridge_ip }}:5432/prototype_net
       Environment=INTERFACE_NAME=xfrm0
       Environment=WAN_INTERFACE=enp0s3
-      Environment=SERVER_IPV6={{ server_ipv6 }}
-      Environment=CLIENT_IPV6={{ client_ipv6 }}
       Restart=on-failure
       RestartSec=5
 
