@@ -1,0 +1,20 @@
+[Unit]
+Description=Create xfrm0 XFRM interface for prototype_net
+After=network-online.target
+Wants=network-online.target
+# Re-run on network events so xfrm0 is re-created if the interface is removed
+PartOf=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Idempotent: only create xfrm0 if it does not already exist.
+# The old "ExecStartPre=-ip link del xfrm0" unconditionally destroyed the
+# interface (and any TC attachments on it) on every restart — replaced here
+# with a conditional add that is a no-op when xfrm0 is already healthy.
+# xfrm_if_id sourced from contract.toml via Ansible ({{ xfrm_if_id }}) or envsubst ($XFRM_IF_ID).
+ExecStart=/bin/sh -c 'ip link show xfrm0 >/dev/null 2>&1 || ip link add xfrm0 type xfrm if_id {{ xfrm_if_id }} dev enp0s3'
+ExecStart=/sbin/ip link set xfrm0 up
+
+[Install]
+WantedBy=multi-user.target

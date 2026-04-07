@@ -1,0 +1,16 @@
+[Unit]
+Description=prototype_net DNS server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/opt/prototype_net/dns-server
+Environment=DATABASE_URL=postgres://prototype:{{ postgres_password }}@{{ host_bridge_ip }}:5432/prototype_net
+Environment=LISTEN_ADDR={{ dns_listen_addr }}:53
+Restart=on-failure
+RestartSec=5
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target

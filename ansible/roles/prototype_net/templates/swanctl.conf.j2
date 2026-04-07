@@ -1,0 +1,34 @@
+pools {
+    client_pool {
+        addrs = {{ vip_pool_start }}-{{ vip_pool_end }}
+    }
+}
+connections {
+    prototype {
+        version = 2
+        proposals = aes256-sha256-ecp384
+        rekey_time = 4h
+        pools = client_pool
+        local {
+            auth = pubkey
+            certs = server.crt
+            id = %any
+        }
+        remote {
+            auth = pubkey
+            cacerts = ca.crt
+        }
+        children {
+            prototype {
+                esp_proposals = aes256gcm128
+                local_ts = ::/0
+                remote_ts = {{ synthetic_prefix_cidr }}
+                mode = tunnel
+                if_id_in = {{ xfrm_if_id }}
+                if_id_out = {{ xfrm_if_id }}
+                start_action = none
+                dpd_action = clear
+            }
+        }
+    }
+}

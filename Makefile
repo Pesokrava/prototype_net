@@ -38,6 +38,14 @@ export
 # Derived values
 # ---------------------------------------------------------------------------
 
+# Read address-space constants from contract.toml (the single source of truth).
+# awk extracts each value from its section.  Fails loudly if the file is missing
+# or a key is absent.
+XFRM_IF_ID           := $(shell awk '/^\[xfrm\]/{f=1} f && /^if_id/{gsub(/[^0-9]/,"",$$3); print $$3; exit}' contract.toml)
+SYNTHETIC_PREFIX_CIDR := $(shell awk '/^\[address\]/{f=1} f && /^synthetic_prefix_cidr/{gsub(/[" ]/,"",$$3); print $$3; exit}' contract.toml)
+VIP_POOL_START        := $(shell awk '/^\[vip_pool\]/{f=1} f && /^pool_start/{gsub(/[" ]/,"",$$3); print $$3; exit}' contract.toml)
+VIP_POOL_END          := $(shell awk '/^\[vip_pool\]/{f=1} f && /^pool_end/{gsub(/[" ]/,"",$$3); print $$3; exit}' contract.toml)
+
 VM_IP          ?= $(SERVER_VM_IP)
 LINUX_TARGET    = x86_64-unknown-linux-gnu
 RELEASE_DIR     = target/$(LINUX_TARGET)/release
@@ -240,6 +248,10 @@ vm-provision:
 		-e host_bridge_ip=$(TF_VAR_host_bridge_ip) \
 		-e server_ipv6=$(TF_VAR_server_ipv6) \
 		-e dns_listen_addr=$(TF_VAR_dns_listen_addr) \
+		-e xfrm_if_id=$(XFRM_IF_ID) \
+		-e synthetic_prefix_cidr=$(SYNTHETIC_PREFIX_CIDR) \
+		-e vip_pool_start=$(VIP_POOL_START) \
+		-e vip_pool_end=$(VIP_POOL_END) \
 		ansible/site.yml
 	@echo ""
 	@echo "==> VM provisioned. Next: make certs && make dev-build && make deploy"
@@ -282,9 +294,9 @@ postgres-down:
 #
 #   deploy-bins    SCPs compiled binaries (daemon, dns-server) to the VM.
 #   deploy-certs   SCPs TLS certificates to the VM swanctl directories.
-#   deploy-units   Pushes systemd unit files from ansible/roles/…/tasks/main.yml
-#                  inline blocks to the VM via SSH and runs daemon-reload.
-#                  Required after any change to unit file content in main.yml.
+#   deploy-units   Renders unit files from ansible/roles/…/templates/*.j2 and
+#                  pushes them to the VM via SSH then runs daemon-reload.
+#                  Required after any change to a template or contract.toml.
 #   deploy         Runs all three sub-targets then restarts services.
 #
 # Changes to ansible/roles/prototype_net/tasks/main.yml that are NOT unit
@@ -314,26 +326,41 @@ deploy-bins:
 
 # deploy-units — push systemd unit files to the VM and reload systemd.
 #
-# Run this after any change to unit file content in
-# ansible/roles/prototype_net/tasks/main.yml.  Full provisioning changes
-# (sysctl, packages, strongSwan config) still require: make vm-provision
+# Renders each unit from ansible/roles/prototype_net/templates/*.j2 by
+# substituting Jinja2 {{ variable }} placeholders with their runtime values
+# using sed.  The same .j2 files are used by `make vm-provision` (via Ansible),
+# so there is exactly ONE source for each unit — no inline printf duplication.
+#
+# Run this after any change to a template or to address-space constants.
+# Full provisioning changes (sysctl, packages, strongSwan config) still
+# require: make vm-provision
 deploy-units:
 	$(call require,SERVER_VM_IP)
 	$(call require,TF_VAR_postgres_password)
 	$(call require,TF_VAR_host_bridge_ip)
 	$(call require,TF_VAR_server_ipv6)
 	$(call require,TF_VAR_dns_listen_addr)
-	@echo "==> Deploying systemd units to VM..."
-	@printf '[Unit]\nDescription=Create xfrm0 XFRM interface for prototype_net\nAfter=network-online.target\nWants=network-online.target\nPartOf=network-online.target\n\n[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/bin/sh -c '"'"'ip link show xfrm0 >/dev/null 2>&1 || ip link add xfrm0 type xfrm if_id 1 dev enp0s3'"'"'\nExecStart=/sbin/ip link set xfrm0 up\n\n[Install]\nWantedBy=multi-user.target\n' \
-		| $(SSH) 'sudo tee /etc/systemd/system/prototype-xfrm0.service > /dev/null'
-	@printf '[Unit]\nDescription=Load strongSwan swanctl connections after charon starts\nAfter=strongswan-starter.service\nBindsTo=strongswan-starter.service\nPartOf=strongswan-starter.service\n\n[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStartPre=/bin/sh -c '"'"'for i in $$(seq 1 20); do test -S /var/run/charon.vici && break; sleep 1; done'"'"'\nExecStart=/usr/sbin/swanctl --load-all\nRestart=on-failure\nRestartSec=3\n\n[Install]\nWantedBy=multi-user.target\n' \
-		| $(SSH) 'sudo tee /etc/systemd/system/prototype-swanctl-load.service > /dev/null'
-	@printf '[Unit]\nDescription=prototype_net eBPF daemon\nAfter=network-online.target strongswan-starter.service prototype-xfrm0.service\nWants=network-online.target\nBindsTo=prototype-xfrm0.service\n\n[Service]\nType=simple\nExecStart=/opt/prototype_net/daemon\nEnvironment=DATABASE_URL=postgres://prototype:%s@%s:5432/prototype_net\nEnvironment=INTERFACE_NAME=xfrm0\nEnvironment=WAN_INTERFACE=enp0s3\nRestart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy=multi-user.target\n' \
-		'$(TF_VAR_postgres_password)' '$(TF_VAR_host_bridge_ip)' \
-		| $(SSH) 'sudo tee /etc/systemd/system/prototype-daemon.service > /dev/null'
-	@printf '[Unit]\nDescription=prototype_net DNS server\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart=/opt/prototype_net/dns-server\nEnvironment=DATABASE_URL=postgres://prototype:%s@%s:5432/prototype_net\nEnvironment=LISTEN_ADDR=%s:53\nRestart=on-failure\nRestartSec=5\nAmbientCapabilities=CAP_NET_BIND_SERVICE\n\n[Install]\nWantedBy=multi-user.target\n' \
-		'$(TF_VAR_postgres_password)' '$(TF_VAR_host_bridge_ip)' '$(TF_VAR_dns_listen_addr)' \
-		| $(SSH) 'sudo tee /etc/systemd/system/prototype-dns-server.service > /dev/null'
+	@test -n "$(XFRM_IF_ID)"           || (echo "ERROR: could not parse xfrm.if_id from contract.toml" && exit 1)
+	@test -n "$(SYNTHETIC_PREFIX_CIDR)" || (echo "ERROR: could not parse address.synthetic_prefix_cidr from contract.toml" && exit 1)
+	@test -n "$(VIP_POOL_START)"        || (echo "ERROR: could not parse vip_pool.pool_start from contract.toml" && exit 1)
+	@test -n "$(VIP_POOL_END)"          || (echo "ERROR: could not parse vip_pool.pool_end from contract.toml" && exit 1)
+	@echo "==> Deploying systemd units to VM (XFRM_IF_ID=$(XFRM_IF_ID))..."
+	@TMPL=ansible/roles/prototype_net/templates; \
+	render() { \
+		sed \
+			-e 's/{{ xfrm_if_id }}/$(XFRM_IF_ID)/g' \
+			-e 's|{{ synthetic_prefix_cidr }}|$(SYNTHETIC_PREFIX_CIDR)|g' \
+			-e 's|{{ vip_pool_start }}|$(VIP_POOL_START)|g' \
+			-e 's|{{ vip_pool_end }}|$(VIP_POOL_END)|g' \
+			-e 's/{{ postgres_password }}/$(TF_VAR_postgres_password)/g' \
+			-e 's/{{ host_bridge_ip }}/$(TF_VAR_host_bridge_ip)/g' \
+			-e 's/{{ dns_listen_addr }}/$(TF_VAR_dns_listen_addr)/g' \
+			"$$TMPL/$$1"; \
+	}; \
+	render prototype-xfrm0.service.j2       | $(SSH) 'sudo tee /etc/systemd/system/prototype-xfrm0.service > /dev/null'; \
+	render prototype-swanctl-load.service.j2 | $(SSH) 'sudo tee /etc/systemd/system/prototype-swanctl-load.service > /dev/null'; \
+	render prototype-daemon.service.j2       | $(SSH) 'sudo tee /etc/systemd/system/prototype-daemon.service > /dev/null'; \
+	render prototype-dns-server.service.j2   | $(SSH) 'sudo tee /etc/systemd/system/prototype-dns-server.service > /dev/null'
 	$(SSH) 'sudo systemctl daemon-reload && sudo systemctl enable prototype-swanctl-load.service'
 	@echo "==> Unit files deployed and systemd reloaded."
 

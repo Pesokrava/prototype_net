@@ -1,0 +1,20 @@
+[Unit]
+Description=prototype_net eBPF daemon
+After=network-online.target strongswan-starter.service prototype-xfrm0.service
+Wants=network-online.target
+# BindsTo ensures the daemon is restarted whenever prototype-xfrm0 is
+# restarted (e.g. xfrm0 interface recreated), so TC attachments are
+# always re-established after any xfrm0 teardown.
+BindsTo=prototype-xfrm0.service
+
+[Service]
+Type=simple
+ExecStart=/opt/prototype_net/daemon
+Environment=DATABASE_URL=postgres://prototype:{{ postgres_password }}@{{ host_bridge_ip }}:5432/prototype_net
+Environment=INTERFACE_NAME=xfrm0
+Environment=WAN_INTERFACE=enp0s3
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
