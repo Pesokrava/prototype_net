@@ -34,8 +34,18 @@ The system works in two phases:
 
 ## Build Order
 
-1. `cargo xtask build-ebpf` -- Compile eBPF programs (nightly toolchain).
-2. `cargo build -p daemon -p dns-server` -- Build userspace binaries (embeds the eBPF ELF).
+1. `cargo xtask verify-contract` -- Verify all config files match `contract.toml` (run automatically by `build-ebpf`).
+2. `cargo test -p common` -- Run address encoding round-trip contract tests.
+3. `cargo xtask build-ebpf` -- Compile eBPF programs (nightly toolchain); calls `verify-contract` first.
+4. `cargo build -p daemon -p dns-server` -- Build userspace binaries (embeds the eBPF ELF).
+
+## Address-Space Contract
+
+All address-space constants (synthetic prefix, VIP pool range, XFRM `if_id`) are defined in a single file: **`contract.toml`** at the workspace root. Do not hardcode these values anywhere else.
+
+- **Rust code** consumes them via `SYNTHETIC_PREFIX`, `VIP_POOL_DISCRIMINATOR`, and `XFRM_IF_ID` constants generated into `common` at compile time by `common/build.rs`.
+- **Config files** (`client/swanctl.conf`, `client/entrypoint.sh`, `ansible/roles/prototype_net/templates/swanctl.conf.j2`, `ansible/roles/prototype_net/templates/prototype-xfrm0.service.j2`) are checked against `contract.toml` by `cargo xtask verify-contract`.
+- **Systemd unit files and the server-side swanctl config** are rendered from Jinja2 templates in `ansible/roles/prototype_net/templates/` — the `xfrm if_id` value is substituted from `contract.toml` at deploy time.
 
 ## Configuration
 
@@ -45,16 +55,16 @@ All runtime configuration is via environment variables. See `.env.example` for t
 
 Each top-level subdirectory contains its own `AGENTS.md` with detailed context about that directory's purpose, contents, and conventions:
 
-- [`common/AGENTS.md`](common/AGENTS.md) -- Shared `#[repr(C)]` BPF map types and address helpers (`no_std` compatible, used by both eBPF and userspace).
+- [`common/AGENTS.md`](common/AGENTS.md) -- Shared `#[repr(C)]` BPF map types and address helpers (`no_std` compatible, used by both eBPF and userspace). Constants generated from `contract.toml` via `build.rs`.
 - [`ebpf/AGENTS.md`](ebpf/AGENTS.md) -- XDP + TC NAT66 eBPF programs (`xdp_wan` and `tc_ingress_wan` on WAN, `tc_ingress` on xfrm0) with stateless proxy-source address encoding (nightly Rust, `bpfel-unknown-none` target).
 - [`daemon/AGENTS.md`](daemon/AGENTS.md) -- Userspace daemon: eBPF loader, BPF map sync from Postgres, periodic DNS re-resolution.
 - [`dns-server/AGENTS.md`](dns-server/AGENTS.md) -- Custom DNS server: mints synthetic AAAA records, stores mappings in Postgres.
-- [`xtask/AGENTS.md`](xtask/AGENTS.md) -- Build automation for cross-compiling the eBPF crate.
+- [`xtask/AGENTS.md`](xtask/AGENTS.md) -- Build automation: cross-compiling eBPF and `verify-contract` config drift detection.
 - [`migrations/AGENTS.md`](migrations/AGENTS.md) -- Postgres schema: `domains` table, `domain_id_seq`, LISTEN/NOTIFY trigger.
 - [`certs/AGENTS.md`](certs/AGENTS.md) -- X.509 certificate generation for strongSwan IKEv2 authentication.
-- [`strongswan/AGENTS.md`](strongswan/AGENTS.md) -- Server-side IKEv2 swanctl configuration.
 - [`client/AGENTS.md`](client/AGENTS.md) -- Docker test client: establishes IPSec tunnel and routes synthetic traffic.
 - [`terraform/AGENTS.md`](terraform/AGENTS.md) -- Libvirt VM provisioning with cloud-init for automated server setup.
+- [`ansible/AGENTS.md`](ansible/AGENTS.md) -- Ansible role for server provisioning: packages, sysctl, strongSwan config, systemd unit templates.
 
 ## Cross-Cutting Conventions
 
