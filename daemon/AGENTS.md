@@ -8,8 +8,8 @@ The daemon runs as an async Tokio application with three concurrent concerns:
 
 1. **eBPF Loading** (`loader.rs`) -- Loads the pre-compiled eBPF ELF (embedded via
    `include_bytes_aligned!()`), attaches `tc_ingress` to the tunnel interface (`xfrm0`)
-   ingress and `tc_ingress_wan` to the WAN interface (`enp0s3`) ingress as `SchedClassifier`
-   programs. Writes the initial `XFRM_IFINDEX` map entry. Pins BPF objects at
+   ingress, `tc_ingress_wan` to WAN ingress (`enp0s3`) as a `SchedClassifier`, and `xdp_wan`
+   to WAN ingress as an XDP program. Writes the initial `XFRM_IFINDEX` map entry. Pins BPF objects at
    `/sys/fs/bpf/prototype_net`. Polls for the tunnel interface to appear (up to 5 minutes)
    so the daemon can start before the first IKEv2 SA is established.
 
@@ -37,7 +37,7 @@ All configuration is via environment variables:
 
 - `DATABASE_URL` -- Postgres connection string.
 - `INTERFACE_NAME` -- Tunnel interface to attach `tc_ingress` to (e.g., `xfrm0`).
-- `WAN_INTERFACE` -- WAN interface to attach `tc_ingress_wan` to (e.g., `enp0s3`).
+- `WAN_INTERFACE` -- WAN interface to attach `xdp_wan` and `tc_ingress_wan` to (e.g., `enp0s3`).
 
 No server IPv6 address or client IPv6 address is required at runtime. The stateless
 proxy-source encoding in the eBPF data plane derives all routing information from the packet

@@ -36,10 +36,10 @@ pub fn synthetic_ipv6(domain_id: u32) -> [u8; 16] {
     let id_bytes = domain_id.to_be_bytes();
     [
         // fd00:abcd prefix (bytes 0-3)
-        0xfd,
-        0x00,
-        0xab,
-        0xcd,
+        SYNTHETIC_PREFIX[0],
+        SYNTHETIC_PREFIX[1],
+        SYNTHETIC_PREFIX[2],
+        SYNTHETIC_PREFIX[3],
         // domain_id (bytes 4-7)
         id_bytes[0],
         id_bytes[1],
@@ -61,53 +61,64 @@ pub fn synthetic_ipv6(domain_id: u32) -> [u8; 16] {
 ///
 /// Layout (16 bytes):
 ///   bytes 0–3  : `fd 00 ab cd`  (ULA /32 prefix)
-///   byte  4    : `0xff`         (proxy-source marker)
-///   byte  5    : `0x00`         (reserved)
-///   bytes 6–7  : client_id (u16 BE)
+///   bytes 4–7  : client_id (u32 BE)
 ///   bytes 8–11 : domain_id (u32 BE)
 ///   bytes 12–15: `0x00 00 00 00`
 ///
-/// Example: client_id=0x0101, domain_id=7 → fd00:abcd:ff00:101:0:7::
-pub fn proxy_src_ipv6(client_id: u16, domain_id: u32) -> [u8; 16] {
+/// Example: client_id=0x00000101, domain_id=7 → fd00:abcd:0:101:0:7::
+pub fn proxy_src_ipv6(client_id: u32, domain_id: u32) -> [u8; 16] {
     let cid = client_id.to_be_bytes();
     let did = domain_id.to_be_bytes();
     [
-        0xfd, 0x00, 0xab, 0xcd, // bytes 0–3: prefix
-        0xff, 0x00, // bytes 4–5: marker + reserved
-        cid[0], cid[1], // bytes 6–7: client_id
-        did[0], did[1], did[2], did[3], // bytes 8–11: domain_id
-        0x00, 0x00, 0x00, 0x00, // bytes 12–15: zero
+        SYNTHETIC_PREFIX[0],
+        SYNTHETIC_PREFIX[1],
+        SYNTHETIC_PREFIX[2],
+        SYNTHETIC_PREFIX[3], // bytes 0–3: prefix
+        cid[0],
+        cid[1],
+        cid[2],
+        cid[3], // bytes 4–7: client_id
+        did[0],
+        did[1],
+        did[2],
+        did[3], // bytes 8–11: domain_id
+        0x00,
+        0x00,
+        0x00,
+        0x00, // bytes 12–15: zero
     ]
 }
 
-/// Return true if `addr` is a proxy-source address (byte 4 == 0xff).
-#[inline(always)]
-pub fn is_proxy_src(addr: &[u8; 16]) -> bool {
-    addr[4] == 0xff
-}
-
 /// Decode `client_id` and `domain_id` from a proxy-source address.
-///
-/// Caller must verify `is_proxy_src()` first.
 #[inline(always)]
-pub fn decode_proxy_src(addr: &[u8; 16]) -> (u16, u32) {
-    let client_id = u16::from_be_bytes([addr[6], addr[7]]);
+pub fn decode_proxy_src(addr: &[u8; 16]) -> (u32, u32) {
+    let client_id = u32::from_be_bytes([addr[4], addr[5], addr[6], addr[7]]);
     let domain_id = u32::from_be_bytes([addr[8], addr[9], addr[10], addr[11]]);
     (client_id, domain_id)
 }
 
 /// Reconstruct the client VIP (`fd00:abcd:0:1::<client_id>`) from a `client_id`.
 ///
-/// Mirrors the strongSwan pool range `::0100–::ffff`.
-pub fn client_vip_from_id(client_id: u16) -> [u8; 16] {
+/// Mirrors the strongSwan pool range `::1:0–::ffff:ffff`.
+pub fn client_vip_from_id(client_id: u32) -> [u8; 16] {
     let cid = client_id.to_be_bytes();
     [
-        0xfd, 0x00, 0xab, 0xcd, // bytes 0–3: prefix
-        0x00, 0x00, // bytes 4–5: zero
-        0x00, 0x01, // bytes 6–7: :0:1 segment
-        0x00, 0x00, 0x00, 0x00, // bytes 8–11: zero
-        0x00, 0x00, // bytes 12–13: zero
-        cid[0], cid[1], // bytes 14–15: client_id
+        SYNTHETIC_PREFIX[0],
+        SYNTHETIC_PREFIX[1],
+        SYNTHETIC_PREFIX[2],
+        SYNTHETIC_PREFIX[3], // bytes 0–3: prefix
+        0x00,
+        0x00, // bytes 4–5: :0 segment
+        0x00,
+        0x01, // bytes 6–7: :1 segment
+        0x00,
+        0x00,
+        0x00,
+        0x00, // bytes 8–11: zero
+        cid[0],
+        cid[1],
+        cid[2],
+        cid[3], // bytes 12–15: client_id
     ]
 }
 

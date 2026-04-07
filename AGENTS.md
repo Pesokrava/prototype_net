@@ -11,6 +11,8 @@ Client DNS query --> dns-server (synthetic AAAA) --> Postgres (domain mapping)
                                                           |
 Client traffic --> IPSec tunnel --> xfrm0 --> ebpf tc_ingress (NAT66) --> origin
                                                           |
+                                              ebpf xdp_wan (WAN ingress filter)
+                                                          |
                                               ebpf tc_ingress_wan (WAN ingress)
                                                           |
                                           BPF maps (NAT_MAP, XFRM_IFINDEX)
@@ -18,7 +20,8 @@ Client traffic --> IPSec tunnel --> xfrm0 --> ebpf tc_ingress (NAT66) --> origin
 
 The system works in two phases:
 1. **DNS phase**: The custom DNS server resolves domains, assigns synthetic `fd00:abcd::/32` addresses, and stores mappings in Postgres (which notifies the daemon).
-2. **Data plane**: eBPF programs on TC hooks rewrite IPv6 addresses in-kernel using a **stateless proxy-source encoding** — no per-flow tables.
+2. **Data plane**: eBPF programs on XDP + TC hooks rewrite IPv6 addresses in-kernel using a **stateless proxy-source encoding** — no per-flow tables.
+   - `xdp_wan` on `enp0s3` ingress: drops IPv6 packets whose destination is outside `fd00:abcd::/32` and passes everything else (including non-IPv6 and parse failures).
    - `tc_ingress` on `xfrm0` ingress: rewrites synthetic dst→origin and src→`proxy_src_ipv6(client_id, domain_id)` for client→origin traffic. The encoded source address carries all reply-routing information; no flow state is written.
    - `tc_ingress_wan` on `enp0s3` ingress: decodes `client_id` and `domain_id` from the packet's destination address (the proxy-source written by `tc_ingress`), verifies source against `NAT_MAP`, rewrites src→synthetic and dst→client VIP, then redirects to `xfrm0` for IPSec re-encapsulation.
 
@@ -43,7 +46,7 @@ All runtime configuration is via environment variables. See `.env.example` for t
 Each top-level subdirectory contains its own `AGENTS.md` with detailed context about that directory's purpose, contents, and conventions:
 
 - [`common/AGENTS.md`](common/AGENTS.md) -- Shared `#[repr(C)]` BPF map types and address helpers (`no_std` compatible, used by both eBPF and userspace).
-- [`ebpf/AGENTS.md`](ebpf/AGENTS.md) -- TC NAT66 eBPF programs (`tc_ingress` on xfrm0, `tc_ingress_wan` on WAN interface) with stateless proxy-source address encoding (nightly Rust, `bpfel-unknown-none` target).
+- [`ebpf/AGENTS.md`](ebpf/AGENTS.md) -- XDP + TC NAT66 eBPF programs (`xdp_wan` and `tc_ingress_wan` on WAN, `tc_ingress` on xfrm0) with stateless proxy-source address encoding (nightly Rust, `bpfel-unknown-none` target).
 - [`daemon/AGENTS.md`](daemon/AGENTS.md) -- Userspace daemon: eBPF loader, BPF map sync from Postgres, periodic DNS re-resolution.
 - [`dns-server/AGENTS.md`](dns-server/AGENTS.md) -- Custom DNS server: mints synthetic AAAA records, stores mappings in Postgres.
 - [`xtask/AGENTS.md`](xtask/AGENTS.md) -- Build automation for cross-compiling the eBPF crate.

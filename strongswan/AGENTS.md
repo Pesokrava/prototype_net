@@ -8,6 +8,7 @@ This directory contains the reference `swanctl.conf` for the server-side strongS
 - **IKE proposal**: `aes256-sha256-ecp384`.
 - **ESP proposal**: `aes256gcm128`.
 - **Authentication**: Mutual certificate-based (pubkey). Server uses `server.crt`; remote clients validated against `ca.crt`.
+- **Client VIP pool**: `fd00:abcd:0:1::1:0` - `fd00:abcd:0:1::ffff:ffff` (u32 client ID space).
 - **Traffic selectors**: local_ts = `::/0`, remote_ts = `fd00:abcd::/32` -- only synthetic prefix traffic enters the tunnel.
 - **Mode**: Tunnel mode, passive (`start_action = none`) -- the client initiates.
 - **XFRM interface**: `if_id_in = 1` / `if_id_out = 1` -- associates the child SA with XFRM

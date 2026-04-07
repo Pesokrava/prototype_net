@@ -2,8 +2,8 @@ use std::net::Ipv6Addr;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
+use sqlx::postgres::PgPoolOptions;
 use tracing::{info, warn};
 
 use crate::maps::BpfMaps;
@@ -102,9 +102,7 @@ async fn run_listener(database_url: &str, maps: &BpfMaps, pool: &PgPool) -> Resu
                 if let Err(e) = maps.insert_nat_entry(domain_id as u32, origin) {
                     warn!("Failed to update NAT_MAP for domain_id={domain_id}: {e}");
                 } else {
-                    info!(
-                        "Updated NAT_MAP: domain_id={domain_id} → origin={origin_ipv6_text}",
-                    );
+                    info!("Updated NAT_MAP: domain_id={domain_id} → origin={origin_ipv6_text}",);
                 }
             }
             None => {

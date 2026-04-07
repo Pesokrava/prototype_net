@@ -68,7 +68,7 @@ for i in $(seq 1 30); do
 done
 
 # --- Discover VIP assigned by server pool ---
-# The server assigns a per-client IPv6 address from fd00:abcd:0:1::100-::ffff
+# The server assigns a per-client IPv6 address from fd00:abcd:0:1::1:0-::ffff:ffff
 # via IKEv2 Configuration Payload. Parse it from swanctl --list-conns.
 echo "Discovering assigned VIP from IKEv2 SA..."
 ASSIGNED_VIP=""

@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use tracing::{info, Level};
+use tracing::{Level, info};
 use tracing_subscriber::FmtSubscriber;
 
 mod db;

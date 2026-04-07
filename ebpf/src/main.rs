@@ -4,12 +4,11 @@
 use core::mem;
 
 use aya_ebpf::{
-    bindings::TC_ACT_OK,
-    bindings::TC_ACT_SHOT,
+    bindings::{xdp_action::XDP_DROP, xdp_action::XDP_PASS, TC_ACT_OK, TC_ACT_SHOT},
     helpers::{bpf_csum_diff, bpf_redirect},
-    macros::{classifier, map},
+    macros::{classifier, map, xdp},
     maps::{Array, HashMap},
-    programs::TcContext,
+    programs::{TcContext, XdpContext},
 };
 use aya_log_ebpf::info;
 use common::{NatEntry, SYNTHETIC_PREFIX};
@@ -40,6 +39,18 @@ static XFRM_IFINDEX: Array<u32> = Array::with_max_entries(1, 0);
 /// or `Err(())` if that would exceed the packet's data_end boundary.
 #[inline(always)]
 unsafe fn ptr_at<T>(ctx: &TcContext, offset: usize) -> Result<*const T, ()> {
+    let start = ctx.data();
+    let end = ctx.data_end();
+    if start + offset + mem::size_of::<T>() > end {
+        return Err(());
+    }
+    Ok((start + offset) as *const T)
+}
+
+/// Return a raw pointer to type `T` at `offset` bytes into an XDP packet,
+/// or `Err(())` if that would exceed the packet's data_end boundary.
+#[inline(always)]
+unsafe fn ptr_at_xdp<T>(ctx: &XdpContext, offset: usize) -> Result<*const T, ()> {
     let start = ctx.data();
     let end = ctx.data_end();
     if start + offset + mem::size_of::<T>() > end {
@@ -122,6 +133,41 @@ fn ipv6_offset(ctx: &TcContext) -> Result<usize, ()> {
 }
 
 // ---------------------------------------------------------------------------
+// XDP filter on WAN ingress
+//
+// Drop only IPv6 packets whose destination is outside fd00:abcd::/32.
+// Pass everything else (non-IPv6 and parse failures included).
+// ---------------------------------------------------------------------------
+
+#[xdp]
+pub fn xdp_wan(ctx: XdpContext) -> u32 {
+    match try_xdp_wan(&ctx) {
+        Ok(action) => action,
+        Err(_) => XDP_PASS,
+    }
+}
+
+fn try_xdp_wan(ctx: &XdpContext) -> Result<u32, ()> {
+    let ethhdr: *const EthHdr = unsafe { ptr_at_xdp(ctx, 0)? };
+    if unsafe { (*ethhdr).ether_type() } != Ok(EtherType::Ipv6) {
+        return Ok(XDP_PASS);
+    }
+
+    let ipv6hdr: *const Ipv6Hdr = unsafe { ptr_at_xdp(ctx, EthHdr::LEN)? };
+    let dst_ipv6: [u8; 16] = unsafe { (*ipv6hdr).dst_addr };
+
+    if dst_ipv6[0] != SYNTHETIC_PREFIX[0]
+        || dst_ipv6[1] != SYNTHETIC_PREFIX[1]
+        || dst_ipv6[2] != SYNTHETIC_PREFIX[2]
+        || dst_ipv6[3] != SYNTHETIC_PREFIX[3]
+    {
+        return Ok(XDP_DROP);
+    }
+
+    Ok(XDP_PASS)
+}
+
+// ---------------------------------------------------------------------------
 // TC Ingress on xfrm0 — client→origin direction
 //
 // Packets arriving from the IPSec tunnel with dst in fd00:abcd::/32 (synthetic).
@@ -196,11 +242,11 @@ fn try_tc_ingress(ctx: &mut TcContext) -> Result<i32, ()> {
     // Read original src — needed for checksum fixup and for encoding client_id.
     let orig_src: [u8; 16] = unsafe { (*ipv6hdr).src_addr };
 
-    // Derive client_id from the last 2 bytes of the client VIP.
-    // Pool range fd00:abcd:0:1::0100–::ffff — bytes [14..16] hold the unique suffix.
-    let client_id = u16::from_be_bytes([orig_src[14], orig_src[15]]);
+    // Derive client_id from the last 4 bytes of the client VIP.
+    // Pool range fd00:abcd:0:1::1:0–::ffff:ffff — bytes [12..16] hold the unique suffix.
+    let client_id = u32::from_be_bytes([orig_src[12], orig_src[13], orig_src[14], orig_src[15]]);
 
-    // Build stateless proxy-source address: fd00:abcd:ff00:<client_id>:<domain_id>::
+    // Build stateless proxy-source address: fd00:abcd:<client_id_hi16>:<client_id_lo16>:<domain_id_hi16>:<domain_id_lo16>::
     // This encodes all reply-direction information needed by tc_ingress_wan.
     let proxy_src = common::proxy_src_ipv6(client_id, domain_id);
 
@@ -240,8 +286,8 @@ fn try_tc_ingress(ctx: &mut TcContext) -> Result<i32, ()> {
 // TC Ingress on WAN interface (e.g. enp0s3) — origin→client direction
 //
 // Reply packets arriving from origin servers on the WAN interface.
-// If dst is a proxy-source address (byte 4 == 0xff), decode client_id and
-// domain_id from it, reconstruct client VIP, verify src against NAT_MAP,
+// Decode client_id and domain_id from the destination proxy-source address,
+// reconstruct client VIP, verify src against NAT_MAP,
 // then rewrite:
 //   src → synthetic IPv6 (fd00:abcd:XXXX:YYYY::1)
 //   dst → client VIP (fd00:abcd:0:1::<client_id>)
@@ -249,6 +295,9 @@ fn try_tc_ingress(ctx: &mut TcContext) -> Result<i32, ()> {
 //
 // No per-flow state is needed — all routing information is decoded from the
 // packet's destination address (the proxy-source written by tc_ingress).
+//
+// Packets reaching this TC hook have already passed xdp_wan on WAN ingress,
+// so destination is guaranteed to be in fd00:abcd::/32.
 // ---------------------------------------------------------------------------
 
 #[classifier]
@@ -290,11 +339,6 @@ fn try_tc_ingress_wan(ctx: &mut TcContext) -> Result<i32, ()> {
     // by tc_ingress, encoding client_id + domain_id in-packet.
     let dst_ipv6: [u8; 16] = unsafe { (*ipv6hdr).dst_addr };
 
-    // Check proxy-source marker (byte 4 == 0xff). If not present, pass through.
-    if !common::is_proxy_src(&dst_ipv6) {
-        return Ok(TC_ACT_OK);
-    }
-
     // Decode client_id and domain_id from the proxy-source address.
     let (client_id, domain_id) = common::decode_proxy_src(&dst_ipv6);
 
@@ -302,8 +346,8 @@ fn try_tc_ingress_wan(ctx: &mut TcContext) -> Result<i32, ()> {
     let client_ipv6 = common::client_vip_from_id(client_id);
 
     // Read source IPv6 address and verify it matches the known origin in NAT_MAP.
-    // This guards against accidentally intercepting unrelated traffic destined to
-    // an address that happens to have byte 4 == 0xff.
+    // This guards against accidentally intercepting unrelated traffic within
+    // fd00:abcd::/32.
     let src_ipv6: [u8; 16] = unsafe { (*ipv6hdr).src_addr };
     let nat_entry = unsafe { NAT_MAP.get(&domain_id) };
     let nat_entry = match nat_entry {

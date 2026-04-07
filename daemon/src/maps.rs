@@ -3,9 +3,9 @@ use std::os::fd::{AsFd, AsRawFd};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
-use aya::maps::hash_map::HashMap as BpfHashMap;
-use aya::maps::IterableMap;
 use aya::Ebpf;
+use aya::maps::IterableMap;
+use aya::maps::hash_map::HashMap as BpfHashMap;
 use common::NatEntry;
 use sqlx::PgPool;
 use tracing::info;
@@ -23,18 +23,14 @@ struct BpfMapsInner {
 impl BpfMaps {
     /// Extract map file descriptors from the loaded eBPF object.
     pub fn from_ebpf(bpf: &mut Ebpf) -> Result<Self> {
-        let nat_map = bpf
-            .map("NAT_MAP")
-            .context("NAT_MAP not found")?;
+        let nat_map = bpf.map("NAT_MAP").context("NAT_MAP not found")?;
         // Get fd via TryFrom<&Map> → HashMap<&MapData, ..> → IterableMap::map() → fd()
         let nat_ref: BpfHashMap<&aya::maps::MapData, u32, NatEntry> =
             BpfHashMap::try_from(nat_map).context("failed to cast NAT_MAP")?;
         let nat_fd = nat_ref.map().fd().as_fd().as_raw_fd();
 
         Ok(Self {
-            inner: Arc::new(Mutex::new(BpfMapsInner {
-                nat_map_fd: nat_fd,
-            })),
+            inner: Arc::new(Mutex::new(BpfMapsInner { nat_map_fd: nat_fd })),
         })
     }
 
@@ -83,9 +79,7 @@ pub async fn bulk_load_from_db(bpf: &mut Ebpf, pool: &PgPool) -> Result<usize> {
     .await
     .context("failed to fetch all domains for bulk load")?;
 
-    let nat_map_data = bpf
-        .map_mut("NAT_MAP")
-        .context("NAT_MAP not found")?;
+    let nat_map_data = bpf.map_mut("NAT_MAP").context("NAT_MAP not found")?;
     let mut nat_map: BpfHashMap<&mut aya::maps::MapData, u32, NatEntry> =
         BpfHashMap::try_from(nat_map_data).context("failed to cast NAT_MAP")?;
 

@@ -2,8 +2,8 @@ use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use aya::programs::{tc, SchedClassifier, TcAttachType};
-use aya::{include_bytes_aligned, Ebpf};
+use aya::programs::{SchedClassifier, TcAttachType, Xdp, XdpFlags, tc};
+use aya::{Ebpf, include_bytes_aligned};
 use tracing::info;
 
 /// Path where BPF maps are pinned for persistence.
@@ -110,6 +110,18 @@ pub fn load_and_attach(tunnel_iface: &str, wan_iface: &str) -> Result<Ebpf> {
         .attach(wan_iface, TcAttachType::Ingress)
         .context("failed to attach tc_ingress_wan")?;
     info!("Attached tc_ingress_wan to {wan_iface}");
+
+    // Attach xdp_wan to WAN ingress for early fd00:abcd::/32 destination filtering.
+    let xdp_wan: &mut Xdp = bpf
+        .program_mut("xdp_wan")
+        .context("xdp_wan program not found")?
+        .try_into()
+        .context("xdp_wan is not an Xdp program")?;
+    xdp_wan.load().context("failed to load xdp_wan")?;
+    xdp_wan
+        .attach(wan_iface, XdpFlags::default())
+        .context("failed to attach xdp_wan")?;
+    info!("Attached xdp_wan to {wan_iface}");
 
     // Write XFRM_IFINDEX[0] — the tunnel interface's ifindex for bpf_redirect.
     let xfrm_idx = ifindex(tunnel_iface)

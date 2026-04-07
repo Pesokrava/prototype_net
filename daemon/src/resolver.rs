@@ -22,16 +22,15 @@ pub async fn run_periodic_resolver(pool: PgPool, maps: BpfMaps) {
 
 async fn resolve_all(pool: &PgPool, maps: &BpfMaps) -> Result<()> {
     // (domain_id, domain, origin_ipv6_text)
-    let rows: Vec<(i32, String, String)> = sqlx::query_as(
-        r#"SELECT domain_id, domain, host(origin_ipv6)::text FROM domains"#,
-    )
-    .fetch_all(pool)
-    .await
-    .context("failed to fetch domains for re-resolution")?;
+    let rows: Vec<(i32, String, String)> =
+        sqlx::query_as(r#"SELECT domain_id, domain, host(origin_ipv6)::text FROM domains"#)
+            .fetch_all(pool)
+            .await
+            .context("failed to fetch domains for re-resolution")?;
 
     // Use the system resolver for upstream lookups
-    use hickory_resolver::config::*;
     use hickory_resolver::TokioResolver;
+    use hickory_resolver::config::*;
     let resolver = TokioResolver::builder_with_config(
         ResolverConfig::default(),
         hickory_resolver::name_server::TokioConnectionProvider::default(),

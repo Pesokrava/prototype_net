@@ -11,10 +11,11 @@ This directory contains a Docker container that acts as a test client. It establ
   3. Starts strongSwan and loads credentials.
   4. Initiates the IKEv2 tunnel with retry logic (up to 30s timeout).
   5. Configures `/etc/resolv.conf` to point to the custom DNS server (`$DNS_SERVER`).
-  6. Creates an `xfrm0` XFRM interface (`if_id=1`) on `eth0` — matching the `if_id_in/out=1`
-     set in the child SA — assigns the client's IPv6 address to it (`$CLIENT_IPV6`), and
-     routes `fd00:abcd::/32` via `xfrm0` so outbound synthetic traffic is captured by the
-     kernel's XFRM policy and sent through the IPSec tunnel.
+  6. Discovers the VIP assigned by the server's IKEv2 CP pool (`fd00:abcd:0:1::1:0`-
+     `fd00:abcd:0:1::ffff:ffff`), creates an `xfrm0` interface (`if_id=1`) on `eth0`,
+     assigns the VIP on `eth0` and `xfrm0`, and routes `fd00:abcd::/32` via `xfrm0` so
+     outbound synthetic traffic is captured by the kernel's XFRM policy and sent through
+     the IPSec tunnel.
   7. Keeps the container alive with `tail -f /dev/null`.
 - **`swanctl.conf`** -- Client-side IKEv2 config. Mirrors the server config but acts as the
   active initiator (`start_action = start`) with DPD restart enabled. Sets
@@ -23,7 +24,7 @@ This directory contains a Docker container that acts as a test client. It establ
 ## Usage
 
 Started via `docker-compose.yml` at the project root. Requires:
-- `SERVER_IP`, `DNS_SERVER`, and `CLIENT_IPV6` environment variables.
+- `SERVER_IP` and `DNS_SERVER` environment variables.
 - Certificates mounted from `certs/output/` to `/certs/`.
 - `NET_ADMIN` capability (required for IPSec and XFRM interface creation).
 
