@@ -1,0 +1,38 @@
+# contract.toml — single source of truth for all address-space constants.
+#
+# Any change here automatically propagates to the Rust constants compiled into
+# every crate (via common/build.rs) and is verified against all config files
+# by `cargo xtask verify-contract`.
+#
+# DO NOT duplicate these values anywhere else.  Instead:
+#   - Rust code:     use the constants from `common` (generated from this file)
+#   - Config files:  checked by `cargo xtask verify-contract`
+#   - Shell scripts: checked by `cargo xtask verify-contract`
+
+[address]
+# ULA /32 prefix shared by all synthetic, proxy-source, and VIP addresses.
+synthetic_prefix_bytes = [0xfd, 0x00, 0xab, 0xcd]
+synthetic_prefix_cidr  = "fd00:abcd::/32"
+
+[vip_pool]
+# Client VIP layout: fd00:abcd:0:1::<client_id_u32>
+#
+# Bytes 0–3: synthetic prefix (above)
+# Bytes 4–7: pool discriminator [0x00, 0x00, 0x00, 0x01] — the ":0:1" segment
+#             that distinguishes VIPs from proxy-source addresses (which have
+#             non-zero bytes 4–7 = client_id) and from synthetic destinations
+#             (which have domain_id in bytes 4–7, starting at sequence 1).
+# Bytes 8–11: zero
+# Bytes 12–15: client_id (u32 big-endian)
+discriminator_bytes = [0x00, 0x00, 0x00, 0x01]
+
+# Pool range assigned by strongSwan IKEv2 Configuration Payload.
+# client_id 0x00010000 → fd00:abcd:0:1::1:0  (first assignable)
+# client_id 0xffffffff → fd00:abcd:0:1::ffff:ffff (last assignable)
+pool_start = "fd00:abcd:0:1::1:0"
+pool_end   = "fd00:abcd:0:1::ffff:ffff"
+
+[xfrm]
+# XFRM interface if_id used in the strongSwan child SA (if_id_in / if_id_out)
+# and in the matching `ip link add xfrm0 type xfrm if_id <N>` commands.
+if_id = 1
