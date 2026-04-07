@@ -10,3 +10,7 @@ userspace = ["aya"]
 
 [dependencies]
 aya = { version = "0.13.1", optional = true }
+
+[build-dependencies]
+toml  = "0.8"
+serde = { version = "1", features = ["derive"] }
