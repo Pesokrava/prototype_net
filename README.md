@@ -1,150 +1,264 @@
 # prototype_net
 
-eBPF-based IPv6 NAT66 transparent proxy using synthetic DNS addresses, strongSwan IKEv2 tunnels, and Postgres-backed domain mapping.
+eBPF-based IPv6 NAT66 transparent proxy using synthetic DNS AAAA records, strongSwan IKEv2, and Postgres-backed domain mappings.
 
-## Architecture
+## What this project does
 
+`prototype_net` transparently proxies IPv6 traffic through an IPSec tunnel in two phases:
+
+1. DNS phase
+   - Client asks for `AAAA`.
+   - `dns-server` resolves upstream IPv6, allocates a synthetic address in `fd00:abcd::/32`, stores mapping in Postgres.
+   - Postgres trigger emits `NOTIFY domain_changes`.
+
+2. Data-plane phase
+   - Client sends traffic to synthetic destination via IPSec.
+   - eBPF on `xfrm0` and WAN ingress rewrites IPv6 addresses in-kernel.
+   - Reply traffic is decoded and routed back to the correct client without per-flow userspace state.
+
+## Current architecture (important updates)
+
+- Multi-client is supported via strongSwan VIP pool assignment (no static `CLIENT_IPV6` wiring).
+- The data plane uses stateless proxy-source address encoding.
+- `daemon` manages `NAT_MAP` (domain_id -> origin IPv6) plus `XFRM_IFINDEX`; legacy reverse/flow map wiring is gone.
+- Server strongSwan config is rendered from Ansible template (`ansible/roles/prototype_net/templates/swanctl.conf.j2`).
+
+Packet path:
+
+```text
+Client DNS query -> dns-server -> Postgres domains table
+                                 -> NOTIFY domain_changes -> daemon updates NAT_MAP
+
+Client packet (to fd00:abcd::/32) -> IPSec -> xfrm0 ingress tc_ingress
+  tc_ingress: dst synthetic -> origin, src -> proxy_src(client_id, domain_id)
+
+Origin reply -> WAN ingress xdp_wan (prefix filter) -> tc_ingress_wan
+  tc_ingress_wan: decode client_id/domain_id from dst, verify src via NAT_MAP,
+                  rewrite src -> synthetic, dst -> client VIP, redirect to xfrm0
 ```
-Physical Linux Host
-├── docker-compose.yml        — Postgres 18 + test client container
-│     ├── postgres:18         — port 5432, accessible at 192.168.122.1:5432 from VM
-│     └── test-client         — Ubuntu 24.04, strongSwan, curl
-│
-└── libvirt/KVM (virbr0 bridge, host IP 192.168.122.1)
-      └── Server VM (Ubuntu 24.04)
-            ├── strongSwan (IKEv2 IPSec endpoint)
-            ├── daemon binary      — loads eBPF TC programs, syncs BPF maps from Postgres
-            └── dns-server binary  — synthetic AAAA responder, writes domain mappings to Postgres
+
+## Single source of truth
+
+Address-space constants live in `contract.toml`:
+
+- synthetic prefix (`fd00:abcd::/32`)
+- VIP pool discriminator and range
+- XFRM `if_id`
+
+Validation command:
+
+```bash
+cargo xtask verify-contract
 ```
 
-### Data Flow
+In normal workflows this is already enforced by `make dev-build`.
 
-1. Test client queries DNS for `google.com` (AAAA)
-2. DNS server resolves upstream AAAA, mints a synthetic `fd00:abcd:XXXX:YYYY::1` address, stores mapping in Postgres
-3. Postgres NOTIFY triggers daemon to populate BPF maps
-4. Client sends traffic to synthetic address through IPSec tunnel
-5. eBPF `tc_ingress` on `xfrm0` rewrites dst to real origin IPv6, src to server's public IPv6
-6. Origin responds; eBPF `tc_ingress_wan` on `enp0s3` rewrites src back to synthetic, dst to client, redirects to `xfrm0` for IPSec re-encapsulation
-7. Client receives response transparently
+## Repository layout
 
-### IPv6 Address Layout
-
-```
-fd00:abcd:XXXX:YYYY::1
-          └─────────┘
-          domain_id (u32) encoded in bytes [4..8]
-```
+- `common/` shared `no_std` map/value types and address helpers
+- `ebpf/` XDP + TC programs (`xdp_wan`, `tc_ingress`, `tc_ingress_wan`)
+- `daemon/` eBPF loader + Postgres LISTEN/NOTIFY sync + periodic re-resolve
+- `dns-server/` synthetic AAAA DNS server
+- `xtask/` `build-ebpf` and `verify-contract`
+- `ansible/` server provisioning and systemd templates
+- `terraform/` libvirt VM provisioning
+- `client/` Docker strongSwan test client
+- `certs/` CA/server/client certificate generation
 
 ## Prerequisites
 
-- **Rust**: stable 1.87.0+ and nightly (for eBPF cross-compilation)
-- **bpf-linker**: `cargo install bpf-linker`
-- **Docker + Docker Compose**: for Postgres and test client
-- **Terraform**: for VM provisioning
-- **libvirt/KVM**: with `virbr0` bridge network
-- **openssl**: for certificate generation
+For development and testing, you need both tooling and a VM-capable Linux environment.
 
-## Setup
+- Control machine (where you run `make`):
+  - `make`, `git`, `ssh`, `scp`
+  - Rust stable + nightly
+  - `bpf-linker` (`cargo install bpf-linker`)
+  - OpenSSL
+  - Terraform CLI
+  - Ansible (`ansible-playbook`)
+- Linux virtualization host for server VM testing:
+  - Linux machine with `libvirtd` + KVM/QEMU
+  - a usable libvirt URI (`qemu:///system` locally, or remote `qemu+sshcmd://...`)
+  - bridge interface configured (or libvirt NAT network `default`)
+- Container runtime host (for Postgres + test client):
+  - Docker Engine + Docker Compose plugin
+  - IPv6 enabled for Docker networking
+- macOS-specific note:
+  - if building Linux binaries from macOS, use Lima (`limactl`) because Makefile build targets run inside a Linux x86_64 VM (it's just easier than getting shit on by the cross compilation)
 
-### 1. Configure environment
+## Full setup guide (including test client)
+
+This flow uses the built-in Docker test client in `client/`.
+
+### 1) Create `.env`
 
 ```bash
 cp .env.example .env
-vim .env  # set POSTGRES_PASSWORD, SERVER_VM_IP, TF_VAR_*, INTERFACE_NAME, SERVER_IPV6, CLIENT_IPV6
 ```
 
-### 2. Start Postgres
+Fill at least these values:
+
+- `POSTGRES_PASSWORD`
+- `TF_VAR_vm_bridge_name` (or leave empty to use `TF_VAR_vm_network_name=default`)
+- `TF_VAR_libvirt_uri`
+- `TF_VAR_ssh_public_key` (from `ssh-add -L`)
+- `TF_VAR_host_bridge_ip`
+- `TF_VAR_postgres_password` (must exactly match `POSTGRES_PASSWORD`)
+- `TF_VAR_dns_listen_addr` (usually `0.0.0.0`)
+
+Set these after VM creation:
+
+- `SERVER_VM_IP`
+- `TF_VAR_server_ipv6`
+
+### 2) Start Postgres
+This depends on where you want to run the postgres( I run it on the linux host)
 
 ```bash
-docker compose up -d postgres
+make postgres-up
 ```
 
-### 3. Generate certificates
+### 3) Bring up server VM
 
 ```bash
-./certs/gen-certs.sh <SERVER_VM_IP>
+make vm-up
 ```
 
-### 4. Provision VM with Terraform
+Find VM IP (example with local libvirt):
 
 ```bash
-cd terraform
-terraform init
-terraform apply
-cd ..
+virsh -c qemu:///system domifaddr --source agent prototype-net-server
 ```
 
-### 5. Build binaries (inside Lima build VM)
+Set `SERVER_VM_IP` in `.env`.
+
+### 4) Get server global IPv6 and finish env
+
+Use the Makefile SSH helper:
 
 ```bash
-make dev-up        # create Lima x86_64 build VM (first time only)
-make dev-build     # build eBPF + daemon + dns-server
+make vm-ssh
 ```
 
-### 6. Deploy to VM
+Then inside the VM shell run:
 
 ```bash
-make deploy        # SCP binaries + certs + push systemd units, restart services
+ip -6 addr show scope global
 ```
 
-> `make deploy` pushes binaries, certificates, and systemd unit files.
-> Changes to sysctl, packages, or strongSwan config require a full re-provision:
-> `make vm-provision`
+Set `TF_VAR_server_ipv6` in `.env`.
 
-### 7. Start test client
+### 5) Provision VM (packages, strongSwan config, systemd units)
+
+```bash
+make vm-provision
+```
+
+### 6) Generate certs
+
+```bash
+make certs
+```
+
+This creates CA + server certs and default test client certs under `certs/output/`.
+
+### 7) Build binaries
+
+```bash
+make dev-up
+make dev-build
+```
+
+`make dev-build` runs in the Lima VM and builds eBPF + userspace binaries.
+
+### 8) Deploy binaries, certs, and units
+
+```bash
+make deploy
+```
+
+### 9) Start test client container
+
+Linux host:
 
 ```bash
 make client-up
 ```
 
-### 8. Test
+macOS convenience alias:
+
+```bash
+make client-up-mac
+```
+
+The client will:
+
+- establish IKEv2 tunnel
+- request VIP dynamically (`vips = 0::0`)
+- discover assigned VIP from strongSwan
+- create `xfrm0` with matching `if_id`
+- route synthetic prefix traffic via `xfrm0`
+
+### 10) Run end-to-end tests
 
 ```bash
 make test
 ```
 
-## Environment Variables
+This performs DNS + HTTPS tests from inside the test client and dumps `NAT_MAP` from VM.
 
-| Variable | Description | Default |
-|---|---|---|
-| `POSTGRES_PASSWORD` | Postgres password | (required) |
-| `SERVER_VM_IP` | Server VM IP address | (required) |
-| `TF_VAR_host_bridge_ip` | Host bridge IP (virbr0) | `192.168.122.1` |
-| `TF_VAR_postgres_password` | Postgres password for Terraform/Ansible | (required) |
-| `TF_VAR_server_ipv6` | Static IPv6 for server VM | (required) |
-| `TF_VAR_dns_listen_addr` | DNS server bind address | `0.0.0.0` |
-| `INTERFACE_NAME` | Tunnel interface for `tc_ingress` (e.g. `xfrm0`) | (required) |
-| `WAN_INTERFACE` | WAN interface for `tc_ingress_wan` (e.g. `enp0s3`) | (required) |
-| `SERVER_IPV6` | Server's public IPv6 (NAT src) | (required) |
-| `CLIENT_IPV6` | VPN client's IPv6 (IKEv2 traffic selector) | (required) |
-| `DATABASE_URL` | Postgres connection string | (derived) |
+## Useful operational commands
 
-## Project Structure
-
-```
-prototype_net/
-├── Cargo.toml                 # workspace: common, daemon, dns-server, xtask
-├── rust-toolchain.toml        # stable toolchain
-├── docker-compose.yml         # Postgres + test client
-├── migrations/                # Postgres schema
-├── common/                    # shared #[repr(C)] BPF map types (no_std)
-├── ebpf/                      # TC ingress/egress NAT66 programs (nightly, bpfel-unknown-none)
-├── daemon/                    # eBPF loader, BPF map sync, Postgres LISTEN
-├── dns-server/                # synthetic AAAA DNS responder
-├── xtask/                     # build-ebpf cross-compilation helper
-├── certs/                     # CA + cert generation script
-├── strongswan/                # server-side IKEv2 config
-├── client/                    # Docker test client (strongSwan + curl)
-└── terraform/                 # libvirt VM provisioning + cloud-init
+```bash
+make status
+make logs-daemon
+make logs-dns
+make client-down
+make postgres-down
 ```
 
-## Limitations (v1)
+## Verification (Makefile-first)
 
-- No device signature in IPv6 bits
-- No whitelist enforcement (all AAAA-capable domains accepted)
-- No ICMP error translation
-- No fragmentation handling
-- No per-client policy enforcement
-- No client agent automation (macOS/Windows)
-- Single VM only (no HA)
-- No admin API for domain management
+Primary end-to-end validation:
+
+```bash
+make test
+```
+
+Extra checks:
+
+```bash
+make status
+make logs-daemon
+make logs-dns
+```
+
+If you need interactive low-level checks from the client container, use:
+
+```bash
+docker compose exec client swanctl --list-sas
+docker compose exec client dig AAAA google.com +short
+docker compose exec client curl -6 -sv --max-time 15 https://google.com
+```
+
+## Multi-client certificates
+
+Generate additional client certificate + bundle:
+
+```bash
+make client-cert CLIENT_ID=macbook-alice
+```
+
+Outputs:
+
+- `certs/output/client-macbook-alice.crt`
+- `certs/output/client-macbook-alice.key`
+- `certs/output/client-bundle-macbook-alice.json`
+
+The bundle contains private key material; treat it as a secret.
+
+## Troubleshooting notes
+
+- If VM WAN interface is not `enp0s3`, update relevant Ansible systemd templates before provisioning/deploy.
+- After editing any `contract.toml`-derived config, run `cargo xtask verify-contract`.
+- If strongSwan config or other non-unit provisioning changed, rerun `make vm-provision` (not just `make deploy-units`).

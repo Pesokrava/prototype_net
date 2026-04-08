@@ -69,14 +69,12 @@ done
 
 # --- Discover VIP assigned by server pool ---
 # The server assigns a per-client IPv6 address from fd00:abcd:0:1::1:0-::ffff:ffff
-# via IKEv2 Configuration Payload. Parse it from swanctl --list-conns.
+# via IKEv2 Configuration Payload. Parse it from the established IKE_SA.
 echo "Discovering assigned VIP from IKEv2 SA..."
 ASSIGNED_VIP=""
 for i in $(seq 1 10); do
-    # swanctl --list-conns shows local virtual IPs on the vips line
-    VIP_LINE=$(swanctl --list-conns 2>/dev/null | grep -i "vip:" || true)
+    VIP_LINE=$(swanctl --list-sas 2>/dev/null | grep -m1 -E "local .*\[fd[0-9a-f:]+\]" || true)
     if [ -n "$VIP_LINE" ]; then
-        # Extract the first IPv6 address from the vip line
         ASSIGNED_VIP=$(echo "$VIP_LINE" | grep -oE 'fd[0-9a-f:]+' | head -1 || true)
     fi
     if [ -n "$ASSIGNED_VIP" ]; then
@@ -96,6 +94,21 @@ DNS_SERVER="${DNS_SERVER:-}"
 if [ -n "$DNS_SERVER" ]; then
     echo "Setting DNS server to ${DNS_SERVER}"
     echo "nameserver ${DNS_SERVER}" > /etc/resolv.conf
+fi
+
+# --- Restrict plain IPv4 egress ---
+# Keep only a host route to the IPSec gateway so application traffic cannot
+# escape over IPv4 when DNS returns A records.
+if [[ "$SERVER_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    IPV4_GW=$(ip route show default | awk '/default/ {print $3; exit}')
+    if [ -z "$IPV4_GW" ]; then
+        echo "ERROR: Could not determine IPv4 default gateway to pin SERVER_IP route"
+        exit 1
+    fi
+
+    echo "Restricting plain IPv4 egress: allow only ${SERVER_IP}/32 via ${IPV4_GW}"
+    ip route replace "${SERVER_IP}/32" via "$IPV4_GW" dev eth0
+    ip route del default 2>/dev/null || true
 fi
 
 # --- Add route for synthetic prefix ---

@@ -135,7 +135,8 @@ fn ipv6_offset(ctx: &TcContext) -> Result<usize, ()> {
 // ---------------------------------------------------------------------------
 // XDP filter on WAN ingress
 //
-// Drop only IPv6 packets whose destination is outside fd00:abcd::/32.
+// Drop only IPv6 packets whose destination is outside fd00:abcd::/32,
+// except ICMPv6 control traffic which must always pass.
 // Pass everything else (non-IPv6 and parse failures included).
 // ---------------------------------------------------------------------------
 
@@ -154,6 +155,13 @@ fn try_xdp_wan(ctx: &XdpContext) -> Result<u32, ()> {
     }
 
     let ipv6hdr: *const Ipv6Hdr = unsafe { ptr_at_xdp(ctx, EthHdr::LEN)? };
+
+    // Always pass ICMPv6 (NS/NA/RA/RS/PMTU/etc.) so neighbor discovery and
+    // control-plane reachability for the WAN interface are never blocked.
+    if unsafe { (*ipv6hdr).next_hdr } == IpProto::Ipv6Icmp {
+        return Ok(XDP_PASS);
+    }
+
     let dst_ipv6: [u8; 16] = unsafe { (*ipv6hdr).dst_addr };
 
     if dst_ipv6[0] != SYNTHETIC_PREFIX[0]

@@ -404,7 +404,7 @@ _client-up:
 	$(call require,SERVER_VM_IP)
 	@test -f $(CERT_DIR)/client-test-client.crt || (echo "ERROR: client certs not found — run: make certs" && exit 1)
 	@echo "==> Starting $(CLIENT_UP_LABEL)..."
-	$(DOCKER_COMPOSE) up -d --no-deps client
+	$(DOCKER_COMPOSE) up -d --build --force-recreate --no-deps client
 	@echo "==> Waiting for tunnel to establish..."
 	@for i in $$(seq 1 30); do \
 		$(DOCKER_COMPOSE) exec client swanctl --list-sas 2>/dev/null | grep -q ESTABLISHED && \
