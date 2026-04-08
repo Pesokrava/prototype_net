@@ -13,6 +13,9 @@ aya-log-ebpf = "0.1.0"
 # NOTE: edition kept at 2021 -- aya-ebpf 0.1.1 (latest stable) does not yet support edition 2024
 network-types = "0.1"
 common = { path = "../common" }
+# siphasher pulled in transitively via common, but explicit dep ensures the
+# eBPF target resolver sees it.  default-features=false keeps it no_std.
+siphasher = { version = "1", default-features = false }
 
 [profile.release]
 panic = "abort"

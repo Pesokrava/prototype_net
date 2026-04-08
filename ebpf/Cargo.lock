@@ -147,6 +147,7 @@ name = "common"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "siphasher",
  "toml",
 ]
 
@@ -158,6 +159,7 @@ dependencies = [
  "aya-log-ebpf",
  "common",
  "network-types",
+ "siphasher",
 ]
 
 [[package]]
@@ -330,6 +332,12 @@ checksum = "bf41e0cfaf7226dca15e8197172c295a782857fcb97fad1808a166870dee75a3"
 dependencies = [
  "serde",
 ]
+
+[[package]]
+name = "siphasher"
+version = "1.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b2aa850e253778c88a04c3d7323b043aeda9d3e30d5971937c1855769763678e"
 
 [[package]]
 name = "syn"
