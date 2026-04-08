@@ -4,8 +4,6 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-aya = "0.13.1"
-aya-log = "0.2.1"
 common = { path = "../common", features = ["userspace"] }
 hickory-resolver = "0.25.2"
 sqlx = { version = "0.8.6", features = ["postgres", "runtime-tokio", "chrono"] }
@@ -13,3 +11,7 @@ tokio = { version = "1.50.0", features = ["full"] }
 anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = "0.3"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+aya = "0.13.1"
+aya-log = "0.2.1"
