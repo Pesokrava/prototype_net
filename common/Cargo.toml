@@ -10,6 +10,7 @@ userspace = ["aya"]
 
 [dependencies]
 aya = { version = "0.13.1", optional = true }
+siphasher = { version = "1", default-features = false }
 
 [build-dependencies]
 toml  = "0.8"
