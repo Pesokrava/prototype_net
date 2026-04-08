@@ -36,3 +36,11 @@ pool_end   = "fd00:abcd:0:1::ffff:ffff"
 # XFRM interface if_id used in the strongSwan child SA (if_id_in / if_id_out)
 # and in the matching `ip link add xfrm0 type xfrm if_id <N>` commands.
 if_id = 1
+
+[proxy_source]
+# Public /32 prefix used for proxy-source addresses (distinct from SYNTHETIC_PREFIX).
+# Must be a globally routable or operator-owned prefix — never a ULA here.
+# TODO: replace with real owned prefix before production deployment.
+public_prefix_bytes = [0x20, 0x01, 0x0d, 0xb8]
+client_id_bits = 24
+domain_id_bits = 24
