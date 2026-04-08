@@ -19,3 +19,11 @@ server_ipv6: ""
 
 # IP address the DNS server binds to inside the VM.
 dns_listen_addr: "0.0.0.0"
+
+# 256-bit key for proxy-source address obfuscation (PRINCE + SipHash).
+# Generate with: openssl rand -hex 32
+# Required — the daemon will refuse to start without a valid key.
+proxy_addr_key_hex: ""
+
+# Optional: previous key for manual key rotation grace window.
+# proxy_addr_prev_key_hex: ""

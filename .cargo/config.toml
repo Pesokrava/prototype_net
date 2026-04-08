@@ -1,2 +1,10 @@
 [alias]
 xtask = "run --package xtask --"
+
+[build]
+# Use a Linux target so rust-analyzer can resolve aya's Linux-only libc symbols.
+# The daemon uses aya (eBPF) which only compiles on Linux; without this, cargo
+# check on macOS fails for the entire workspace and rust-analyzer goes blind.
+# This does NOT affect the actual cross-compilation in the VM — xtask build-ebpf
+# uses an explicit --target flag and is unaffected by this default.
+target = "x86_64-unknown-linux-gnu"

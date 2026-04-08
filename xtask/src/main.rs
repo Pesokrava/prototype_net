@@ -18,6 +18,24 @@ enum Commands {
     BuildEbpf,
     /// Verify that all config files match the constants in contract.toml.
     VerifyContract,
+    /// Decode an obfuscated proxy-source IPv6 address to recover client_id and domain_id.
+    DecodeProxySrc {
+        /// 256-bit key as 64 hex characters (same as PROXY_ADDR_KEY_HEX).
+        #[arg(long)]
+        key: String,
+        /// The proxy-source IPv6 address to decode (e.g. 2001:0db8:xxxx:...).
+        #[arg(long)]
+        addr: String,
+        /// Source port (client's ephemeral port from the original outbound connection).
+        #[arg(long)]
+        src_port: u16,
+        /// Destination port (server port from the original outbound connection, e.g. 443).
+        #[arg(long)]
+        dst_port: u16,
+        /// IP protocol: "tcp" or "udp".
+        #[arg(long)]
+        proto: String,
+    },
 }
 
 fn main() -> Result<()> {
@@ -26,6 +44,13 @@ fn main() -> Result<()> {
     match cli.command {
         Commands::BuildEbpf => build_ebpf(),
         Commands::VerifyContract => verify_contract(),
+        Commands::DecodeProxySrc {
+            key,
+            addr,
+            src_port,
+            dst_port,
+            proto,
+        } => decode_proxy_src(&key, &addr, src_port, dst_port, &proto),
     }
 }
 
@@ -145,6 +170,93 @@ fn verify_contract() -> Result<()> {
             failures.len()
         )
     }
+}
+
+// ---------------------------------------------------------------------------
+// decode-proxy-src
+// ---------------------------------------------------------------------------
+
+fn decode_proxy_src(
+    key_hex: &str,
+    addr_str: &str,
+    src_port: u16,
+    dst_port: u16,
+    proto: &str,
+) -> Result<()> {
+    use common::{ProxySrcCtx, ProxySrcKey};
+
+    // Parse key.
+    let key_hex = key_hex.trim();
+    if key_hex.len() != 64 {
+        bail!(
+            "key must be exactly 64 hex characters (32 bytes), got {}",
+            key_hex.len()
+        );
+    }
+    let mut key_bytes = [0u8; 32];
+    for i in 0..32 {
+        key_bytes[i] = u8::from_str_radix(&key_hex[i * 2..i * 2 + 2], 16)
+            .with_context(|| format!("invalid hex at position {}", i * 2))?;
+    }
+    let mut prince_key = [0u8; 16];
+    let mut siphash_key = [0u8; 16];
+    prince_key.copy_from_slice(&key_bytes[0..16]);
+    siphash_key.copy_from_slice(&key_bytes[16..32]);
+    let key = ProxySrcKey {
+        prince_key,
+        siphash_key,
+    };
+
+    // Parse IPv6 address into 16 bytes.
+    let addr_bytes =
+        parse_ipv6(addr_str.trim()).with_context(|| format!("invalid IPv6 address: {addr_str}"))?;
+
+    // Parse protocol.
+    let proto_num: u8 = match proto.to_lowercase().as_str() {
+        "tcp" => 6,
+        "udp" => 17,
+        _ => bail!("proto must be 'tcp' or 'udp', got '{proto}'"),
+    };
+
+    let ctx = ProxySrcCtx {
+        src_port,
+        dst_port,
+        proto: proto_num,
+        _pad: [0; 3],
+    };
+
+    match common::decode_proxy_src(&addr_bytes, &ctx, &key) {
+        Some((client_id, domain_id)) => {
+            println!("client_id={client_id}, domain_id={domain_id}");
+            // Also print the reconstructed client VIP and synthetic address.
+            let vip = common::client_vip_from_id24(client_id);
+            let synthetic = common::synthetic_ipv6(domain_id);
+            println!("client_vip={}", format_ipv6(&vip));
+            println!("synthetic_addr={}", format_ipv6(&synthetic));
+        }
+        None => {
+            eprintln!("DECODE FAILED: tag mismatch, padding error, or wrong key/context");
+            std::process::exit(1);
+        }
+    }
+
+    Ok(())
+}
+
+/// Parse a textual IPv6 address (with :: shorthand) into a 16-byte array.
+/// Supports both full and compressed forms: `2001:0db8::1`, `::1`, etc.
+fn parse_ipv6(s: &str) -> Result<[u8; 16]> {
+    // Use std::net for parsing.
+    let addr: std::net::Ipv6Addr = s
+        .parse()
+        .with_context(|| format!("failed to parse IPv6: {s}"))?;
+    Ok(addr.octets())
+}
+
+/// Format 16 bytes as a canonical IPv6 string.
+fn format_ipv6(bytes: &[u8; 16]) -> String {
+    let addr = std::net::Ipv6Addr::from(*bytes);
+    format!("{addr}")
 }
 
 // ---------------------------------------------------------------------------

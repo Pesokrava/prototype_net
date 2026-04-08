@@ -13,6 +13,10 @@ ExecStart=/opt/prototype_net/daemon
 Environment=DATABASE_URL=postgres://prototype:{{ postgres_password }}@{{ host_bridge_ip }}:5432/prototype_net
 Environment=INTERFACE_NAME=xfrm0
 Environment=WAN_INTERFACE=enp0s3
+Environment=PROXY_ADDR_KEY_HEX={{ proxy_addr_key_hex }}
+{% if proxy_addr_prev_key_hex is defined and proxy_addr_prev_key_hex %}
+Environment=PROXY_ADDR_PREV_KEY_HEX={{ proxy_addr_prev_key_hex }}
+{% endif %}
 Restart=on-failure
 RestartSec=5
 
