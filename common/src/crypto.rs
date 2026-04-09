@@ -367,56 +367,31 @@ mod tests {
 
     #[test]
     fn hash_ctx_zero() {
-        let ctx = ProxySrcCtx {
-            src_port: 0,
-            dst_port: 0,
-            proto: 0,
-            _pad: [0; 3],
-        };
+        let ctx = ProxySrcCtx::new(0, 0, 0);
         assert_eq!(hash_ctx(&ctx), 0x0000000000000000);
     }
 
     #[test]
     fn hash_ctx_443_50000_tcp() {
-        let ctx = ProxySrcCtx {
-            src_port: 443,
-            dst_port: 50000,
-            proto: 6,
-            _pad: [0; 3],
-        };
+        let ctx = ProxySrcCtx::new(443, 50000, 6);
         assert_eq!(hash_ctx(&ctx), 0xae510a47a775e0c3);
     }
 
     #[test]
     fn hash_ctx_50000_443_tcp() {
-        let ctx = ProxySrcCtx {
-            src_port: 50000,
-            dst_port: 443,
-            proto: 6,
-            _pad: [0; 3],
-        };
+        let ctx = ProxySrcCtx::new(50000, 443, 6);
         assert_eq!(hash_ctx(&ctx), 0x6999dcb37e570b67);
     }
 
     #[test]
     fn hash_ctx_443_50000_udp() {
-        let ctx = ProxySrcCtx {
-            src_port: 443,
-            dst_port: 50000,
-            proto: 17,
-            _pad: [0; 3],
-        };
+        let ctx = ProxySrcCtx::new(443, 50000, 17);
         assert_eq!(hash_ctx(&ctx), 0x8e7b5430862b54bc);
     }
 
     #[test]
     fn hash_ctx_1_1_1() {
-        let ctx = ProxySrcCtx {
-            src_port: 1,
-            dst_port: 1,
-            proto: 1,
-            _pad: [0; 3],
-        };
+        let ctx = ProxySrcCtx::new(1, 1, 1);
         assert_eq!(hash_ctx(&ctx), 0xfbf2b99b8d507220);
     }
 

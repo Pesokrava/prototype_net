@@ -1,6 +1,6 @@
 use std::{fs, path::PathBuf, process::Command};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use serde::Deserialize;
 
@@ -218,12 +218,7 @@ fn decode_proxy_src(
         _ => bail!("proto must be 'tcp' or 'udp', got '{proto}'"),
     };
 
-    let ctx = ProxySrcCtx {
-        src_port,
-        dst_port,
-        proto: proto_num,
-        _pad: [0; 3],
-    };
+    let ctx = ProxySrcCtx::new(src_port, dst_port, proto_num);
 
     match common::decode_proxy_src(&addr_bytes, &ctx, &key) {
         Some((client_id, domain_id)) => {

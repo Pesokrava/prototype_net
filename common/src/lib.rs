@@ -23,7 +23,19 @@ pub struct ProxySrcCtx {
     pub src_port: u16, // host-order, converted from BE wire format
     pub dst_port: u16, // host-order, converted from BE wire format
     pub proto: u8,     // IP protocol number (6=TCP, 17=UDP)
-    pub _pad: [u8; 3], // always zero, not included in hash_ctx packing
+    _pad: [u8; 3],     // always zero, not included in hash_ctx packing
+}
+
+impl ProxySrcCtx {
+    #[inline(always)]
+    pub fn new(src_port: u16, dst_port: u16, proto: u8) -> Self {
+        Self {
+            src_port,
+            dst_port,
+            proto,
+            _pad: [0; 3],
+        }
+    }
 }
 
 /// 256-bit key material for proxy-source obfuscation.
@@ -300,12 +312,7 @@ mod tests {
     };
 
     fn tcp_ctx(src_port: u16, dst_port: u16) -> ProxySrcCtx {
-        ProxySrcCtx {
-            src_port,
-            dst_port,
-            proto: 6,
-            _pad: [0; 3],
-        }
+        ProxySrcCtx::new(src_port, dst_port, 6)
     }
 
     // -- Existing contract tests (adapted) --

@@ -10,7 +10,7 @@ use aya_ebpf::{
     maps::{Array, HashMap},
     programs::{TcContext, XdpContext},
 };
-use aya_log_ebpf::info;
+use aya_log_ebpf::{error, info, warn};
 use common::{NatEntry, ProxySrcCtx, ProxySrcKey, PROXY_SRC_PREFIX, SYNTHETIC_PREFIX};
 use network_types::{
     eth::{EthHdr, EtherType},
@@ -145,24 +145,15 @@ fn extract_l4_ports(ctx: &TcContext, l4_base: usize, proto: IpProto) -> Result<(
             let dst = u16::from_be_bytes(unsafe { (*tcp).dest });
             Ok((src, dst))
         }
-        _ => {
+        IpProto::Udp => {
             // UDP (caller guarantees proto is TCP or UDP)
             let udp: *const UdpHdr = unsafe { ptr_at(ctx, l4_base)? };
             let src = u16::from_be_bytes(unsafe { (*udp).src });
             let dst = u16::from_be_bytes(unsafe { (*udp).dst });
             Ok((src, dst))
         }
-    }
-}
-
-/// Build a `ProxySrcCtx` from L4 ports and protocol.
-#[inline(always)]
-fn build_ctx(src_port: u16, dst_port: u16, proto: u8) -> ProxySrcCtx {
-    ProxySrcCtx {
-        src_port,
-        dst_port,
-        proto,
-        _pad: [0; 3],
+        // This is unreachable because callers check for TCP/UDP.
+        _ => unsafe { core::hint::unreachable_unchecked() },
     }
 }
 
@@ -267,7 +258,7 @@ fn try_tc_ingress(ctx: &mut TcContext) -> Result<i32, ()> {
     let nat_entry = match nat_entry {
         Some(e) => e,
         None => {
-            info!(ctx, "tc_ingress: NAT_MAP miss for domain_id={}", domain_id);
+            warn!(ctx, "tc_ingress: NAT_MAP miss for domain_id={}", domain_id);
             return Ok(TC_ACT_SHOT);
         }
     };
@@ -288,7 +279,7 @@ fn try_tc_ingress(ctx: &mut TcContext) -> Result<i32, ()> {
     let key = match key {
         Some(k) if !k.is_zero() => k,
         _ => {
-            info!(ctx, "tc_ingress: OBFS_KEYS[0] not set, dropping");
+            error!(ctx, "tc_ingress: OBFS_KEYS[0] not set, dropping");
             return Ok(TC_ACT_SHOT);
         }
     };
@@ -298,7 +289,7 @@ fn try_tc_ingress(ctx: &mut TcContext) -> Result<i32, ()> {
         IpProto::Tcp => 6u8,
         _ => 17u8, // UDP
     };
-    let flow_ctx = build_ctx(src_port, dst_port, proto_num);
+    let flow_ctx = ProxySrcCtx::new(src_port, dst_port, proto);
     let proxy_src = match common::encode_proxy_src(client_id, domain_id, &flow_ctx, key) {
         Some(addr) => addr,
         None => {
@@ -409,7 +400,7 @@ fn try_tc_ingress_wan(ctx: &mut TcContext) -> Result<i32, ()> {
         _ => 17u8,
     };
     // Swap ports to reconstruct the original tc_ingress perspective.
-    let flow_ctx = build_ctx(reply_dst_port, reply_src_port, proto_num);
+    let flow_ctx = ProxySrcCtx::new(reply_dst_port, reply_src_port, proto_num);
 
     // Try decode with active key (slot 0), then previous key (slot 1) if needed.
     let decoded = try_decode_with_keys(&dst_ipv6, &flow_ctx);
@@ -479,7 +470,7 @@ fn try_tc_ingress_wan(ctx: &mut TcContext) -> Result<i32, ()> {
     let xfrm_ifindex = match xfrm_ifindex {
         Some(idx) if *idx != 0 => *idx,
         _ => {
-            info!(ctx, "tc_ingress_wan: XFRM_IFINDEX not set, dropping");
+            error!(ctx, "tc_ingress_wan: XFRM_IFINDEX not set, dropping");
             return Ok(TC_ACT_SHOT);
         }
     };
