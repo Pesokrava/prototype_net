@@ -10,8 +10,10 @@ use aya_ebpf::{
     maps::{Array, HashMap},
     programs::{TcContext, XdpContext},
 };
-use aya_log_ebpf::{error, info, warn};
+use aya_log_ebpf::info;
 use common::{NatEntry, ProxySrcCtx, ProxySrcKey, PROXY_SRC_PREFIX, SYNTHETIC_PREFIX};
+#[cfg(feature = "dev-mode")]
+use common::{ReplyTrackKey, ReplyTrackValue};
 use network_types::{
     eth::{EthHdr, EtherType},
     ip::{IpProto, Ipv6Hdr},
@@ -31,14 +33,55 @@ static NAT_MAP: HashMap<u32, NatEntry> = HashMap::with_max_entries(65536, 0);
 #[map]
 static XFRM_IFINDEX: Array<u32> = Array::with_max_entries(1, 0);
 
+// WAN_IFINDEX removed: xdp_wan now uses XDP_PASS after rewrite instead of bpf_redirect.
+
 /// Slot 0 = active key, slot 1 = previous key (zero if no rotation in progress).
 /// Written by daemon at startup.
 #[map]
 static OBFS_KEYS: Array<ProxySrcKey> = Array::with_max_entries(2, 0);
 
+/// Dev-mode WAN IPv6 address. When set (non-zero), tc_ingress uses this as the
+/// source address instead of proxy-source, enabling double-NAT for dev testing.
+/// xdp_wan also uses this to detect and rewrite reply packets.
+/// In production this is all zeros — normal proxy-source encoding is used.
+#[cfg(feature = "dev-mode")]
+#[map]
+static DEV_WAN_IPV6: Array<[u8; 16]> = Array::with_max_entries(1, 0);
+
+/// Dev-mode reply tracking: maps (origin, origin_port, translated_port, proto) → proxy_source.
+/// When tc_ingress rewrites src to WAN-IPv6 (dev mode), it stores the original
+/// proxy-source here. xdp_wan looks up replies by the 4-tuple and rewrites
+/// dst from WAN-IPv6 back to proxy-source, then redirects for normal processing.
+/// LRU eviction handles connection cleanup automatically.
+#[cfg(feature = "dev-mode")]
+#[map]
+static REPLY_TRACK: HashMap<ReplyTrackKey, ReplyTrackValue> = HashMap::with_max_entries(65536, 0);
+
+/// Dev-mode debug counters for tracing xdp_wan decision paths.
+/// Index 0: entered try_xdp_wan (IPv6, non-ICMPv6)
+/// Index 1: dst matched PROXY_SRC_PREFIX
+/// Index 2: dst matched DEV_WAN_IPV6
+/// Index 3: REPLY_TRACK lookup hit
+/// Index 4: REPLY_TRACK lookup miss
+/// Index 5: XDP_DROP (fell through)
+/// Index 6: dst_ipv6 != wan (entered dev block but didn't match)
+/// Index 7: DEV_WAN_IPV6 not populated / None
+#[cfg(feature = "dev-mode")]
+#[map]
+static DBG_COUNTERS: Array<u64> = Array::with_max_entries(8, 0);
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Increment a debug counter atomically.
+#[cfg(feature = "dev-mode")]
+#[inline(always)]
+fn dbg_inc(idx: u32) {
+    if let Some(val) = unsafe { DBG_COUNTERS.get_ptr_mut(idx) } {
+        unsafe { *val += 1 };
+    }
+}
 
 /// Return a raw pointer to type `T` at `offset` bytes into the packet,
 /// or `Err(())` if that would exceed the packet's data_end boundary.
@@ -75,6 +118,8 @@ const BPF_F_PSEUDO_HDR: u64 = 1 << 4;
 /// sidesteps CHECKSUM_COMPLETE interactions on NIC-offloaded ingress packets.
 /// Corresponds to BPF_F_MARK_MANGLED_0 = (1 << 5) from include/uapi/linux/bpf.h.
 const BPF_F_MARK_MANGLED_0: u64 = 1 << 5;
+
+// BPF_F_INGRESS removed: no longer needed after switching xdp_wan from bpf_redirect to XDP_PASS.
 
 /// Update the L4 checksum for a single address change (one 16-byte IPv6 address).
 ///
@@ -190,16 +235,146 @@ fn try_xdp_wan(ctx: &XdpContext) -> Result<u32, ()> {
 
     let dst_ipv6: [u8; 16] = unsafe { (*ipv6hdr).dst_addr };
 
+    // DBG 0: entered try_xdp_wan with IPv6, non-ICMPv6 packet
+    #[cfg(feature = "dev-mode")]
+    dbg_inc(0);
+
+    info!(
+        ctx,
+        "xdp_wan: ipv6 pkt dst[0..4]={:x}:{:x}:{:x}:{:x}",
+        dst_ipv6[0],
+        dst_ipv6[1],
+        dst_ipv6[2],
+        dst_ipv6[3]
+    );
     // Accept ONLY packets destined for PROXY_SRC_PREFIX (return traffic from origins).
     if dst_ipv6[0] == PROXY_SRC_PREFIX[0]
         && dst_ipv6[1] == PROXY_SRC_PREFIX[1]
         && dst_ipv6[2] == PROXY_SRC_PREFIX[2]
         && dst_ipv6[3] == PROXY_SRC_PREFIX[3]
     {
+        // DBG 1: dst matched PROXY_SRC_PREFIX
+        #[cfg(feature = "dev-mode")]
+        dbg_inc(1);
         return Ok(XDP_PASS);
     }
 
+    // Dev-mode reply handling: check if this is a reply to a tracked connection.
+    // In dev-mode, replies arrive with dst=server's WAN IPv6 instead of proxy-source.
+    // We rewrite dst back to proxy-source and redirect for normal processing.
+    #[cfg(feature = "dev-mode")]
+    {
+        let dev_wan = DEV_WAN_IPV6.get(0);
+        if let Some(wan_addr) = dev_wan {
+            let wan = *wan_addr;
+            // Check if non-zero (dev mode enabled) and dst matches WAN IPv6
+            if wan != [0u8; 16] && dst_ipv6 == wan {
+                // DBG 2: dst matched DEV_WAN_IPV6
+                dbg_inc(2);
+                let nexthdr = unsafe { (*ipv6hdr).next_hdr };
+                let proto = match nexthdr {
+                    IpProto::Tcp => 6u8,
+                    IpProto::Udp => 17u8,
+                    _ => return Ok(XDP_PASS), // Not TCP/UDP, pass through
+                };
+
+                // Extract ports from L4 header
+                let l4_base = EthHdr::LEN + Ipv6Hdr::LEN;
+                let (src_port, dst_port) = match extract_l4_ports_xdp(ctx, l4_base, nexthdr) {
+                    Ok(ports) => ports,
+                    Err(_) => return Ok(XDP_PASS),
+                };
+
+                info!(
+                    ctx,
+                    "xdp_wan: dst==WAN, proto={} src_port={} dst_port={}",
+                    proto,
+                    src_port,
+                    dst_port
+                );
+
+                // Look up the tracked connection
+                let src_ipv6: [u8; 16] = unsafe { (*ipv6hdr).src_addr };
+                let track_key = ReplyTrackKey {
+                    origin_ipv6: src_ipv6,
+                    origin_port: src_port.to_be(), // origin's port (e.g., 443)
+                    translated_port: dst_port.to_be(), // our original source port
+                    proto,
+                    ..Default::default()
+                };
+
+                info!(
+                    ctx,
+                    "xdp_wan: REPLY_TRACK lookup origin_port_be={} xlat_port_be={}",
+                    src_port.to_be(),
+                    dst_port.to_be()
+                );
+
+                if let Some(track_val) = unsafe { REPLY_TRACK.get(&track_key) } {
+                    // DBG 3: REPLY_TRACK hit
+                    dbg_inc(3);
+                    // Found! This is a reply to a tracked connection.
+                    info!(ctx, "xdp_wan: REPLY_TRACK HIT, rewriting dst and passing");
+
+                    // Rewrite dst: WAN-IPv6 → proxy-source using raw pointer manipulation.
+                    // We do NOT update the L4 checksum here — XDP can't safely invalidate
+                    // the NIC's CHECKSUM_COMPLETE metadata. tc_ingress_wan compensates by
+                    // adding the missing WAN→proxy_src checksum delta in its dev-mode block.
+                    let ipv6hdr_mut = ipv6hdr as *mut Ipv6Hdr;
+                    unsafe {
+                        (*ipv6hdr_mut).dst_addr = track_val.proxy_src;
+                    }
+
+                    return Ok(XDP_PASS);
+                }
+                // dst == WAN_IPV6 but not in REPLY_TRACK: this is the server's own traffic
+                // (not proxied through tc_ingress). Pass it through to the kernel.
+                // DBG 4: REPLY_TRACK miss
+                dbg_inc(4);
+                info!(ctx, "xdp_wan: REPLY_TRACK MISS, passing through");
+                return Ok(XDP_PASS);
+            } else {
+                // DBG 6: entered dev block but dst != wan (or wan is zero)
+                dbg_inc(6);
+            }
+        } else {
+            // DBG 7: DEV_WAN_IPV6 not populated / None
+            dbg_inc(7);
+        }
+    }
+
+    // DBG 5: fell through to XDP_DROP
+    #[cfg(feature = "dev-mode")]
+    dbg_inc(5);
+
     Ok(XDP_DROP)
+}
+
+// csum_increment removed: replaced by inline one's complement fold in xdp_wan REPLY_TRACK hit path.
+
+/// Extract L4 ports from XDP context.
+#[cfg(feature = "dev-mode")]
+#[inline(always)]
+fn extract_l4_ports_xdp(
+    ctx: &XdpContext,
+    l4_base: usize,
+    proto: IpProto,
+) -> Result<(u16, u16), ()> {
+    match proto {
+        IpProto::Tcp => {
+            let tcp: *const TcpHdr = unsafe { ptr_at_xdp(ctx, l4_base)? };
+            let src = u16::from_be_bytes(unsafe { (*tcp).source });
+            let dst = u16::from_be_bytes(unsafe { (*tcp).dest });
+            Ok((src, dst))
+        }
+        IpProto::Udp => {
+            let udp: *const UdpHdr = unsafe { ptr_at_xdp(ctx, l4_base)? };
+            let src = u16::from_be_bytes(unsafe { (*udp).src });
+            let dst = u16::from_be_bytes(unsafe { (*udp).dst });
+            Ok((src, dst))
+        }
+        _ => Err(()),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -241,6 +416,14 @@ fn try_tc_ingress(ctx: &mut TcContext) -> Result<i32, ()> {
     // Read destination IPv6 address.
     let dst_ipv6: [u8; 16] = unsafe { (*ipv6hdr).dst_addr };
 
+    info!(
+        ctx,
+        "tc_ingress: pkt dst[0..4]={:x}:{:x}:{:x}:{:x}",
+        dst_ipv6[0],
+        dst_ipv6[1],
+        dst_ipv6[2],
+        dst_ipv6[3]
+    );
     // Check prefix: fd00:abcd::/32 — only intercept synthetic destination addresses.
     if dst_ipv6[0] != SYNTHETIC_PREFIX[0]
         || dst_ipv6[1] != SYNTHETIC_PREFIX[1]
@@ -257,10 +440,7 @@ fn try_tc_ingress(ctx: &mut TcContext) -> Result<i32, ()> {
     let nat_entry = unsafe { NAT_MAP.get(&domain_id) };
     let nat_entry = match nat_entry {
         Some(e) => e,
-        None => {
-            warn!(ctx, "tc_ingress: NAT_MAP miss for domain_id={}", domain_id);
-            return Ok(TC_ACT_SHOT);
-        }
+        None => return Ok(TC_ACT_SHOT),
     };
 
     // Read original src — needed for checksum fixup and for encoding client_id.
@@ -275,13 +455,10 @@ fn try_tc_ingress(ctx: &mut TcContext) -> Result<i32, ()> {
     let (src_port, dst_port) = extract_l4_ports(ctx, l4_base, nexthdr)?;
 
     // Read active obfuscation key from OBFS_KEYS[0].
-    let key = unsafe { OBFS_KEYS.get(0) };
+    let key = OBFS_KEYS.get(0);
     let key = match key {
         Some(k) if !k.is_zero() => k,
-        _ => {
-            error!(ctx, "tc_ingress: OBFS_KEYS[0] not set, dropping");
-            return Ok(TC_ACT_SHOT);
-        }
+        _ => return Ok(TC_ACT_SHOT),
     };
 
     // Build flow context and encode the obfuscated proxy-source address.
@@ -289,16 +466,10 @@ fn try_tc_ingress(ctx: &mut TcContext) -> Result<i32, ()> {
         IpProto::Tcp => 6u8,
         _ => 17u8, // UDP
     };
-    let flow_ctx = ProxySrcCtx::new(src_port, dst_port, proto);
+    let flow_ctx = ProxySrcCtx::new(src_port, dst_port, proto_num);
     let proxy_src = match common::encode_proxy_src(client_id, domain_id, &flow_ctx, key) {
         Some(addr) => addr,
-        None => {
-            info!(
-                ctx,
-                "tc_ingress: encode failed cid={} did={}", client_id, domain_id
-            );
-            return Ok(TC_ACT_SHOT);
-        }
+        None => return Ok(TC_ACT_SHOT),
     };
 
     // Byte offsets for src/dst address fields within the packet.
@@ -318,17 +489,55 @@ fn try_tc_ingress(ctx: &mut TcContext) -> Result<i32, ()> {
             .map_err(|_| ())?;
     }
 
-    // Rewrite src → obfuscated proxy-source address (encodes client_id + domain_id + flow context)
-    for i in 0..16 {
-        ctx.store(ipv6_src_offset + i, &proxy_src[i], 0)
-            .map_err(|_| ())?;
+    // Determine source address based on dev-mode.
+    // Production: use obfuscated proxy-source (encodes client_id + domain_id + flow context)
+    // Dev-mode: use server's WAN IPv6 for double-NAT, track for reply handling
+    #[cfg(feature = "dev-mode")]
+    let final_src: [u8; 16] = {
+        let dev_wan = DEV_WAN_IPV6.get(0);
+        if let Some(wan_addr) = dev_wan {
+            let wan = *wan_addr;
+            // Check if non-zero (dev mode enabled)
+            if wan != [0u8; 16] {
+                // Track this connection for reply handling in xdp_wan
+                let track_key = ReplyTrackKey {
+                    origin_ipv6: nat_entry.origin_ipv6,
+                    origin_port: dst_port.to_be(),     // server's port
+                    translated_port: src_port.to_be(), // our source port
+                    proto: proto_num,
+                    ..Default::default()
+                };
+                let track_val = ReplyTrackValue {
+                    proxy_src: proxy_src,
+                };
+                let _ = REPLY_TRACK.insert(&track_key, &track_val, 0);
+                info!(
+                    ctx,
+                    "tc_ingress: REPLY_TRACK insert dst_port_be={} src_port_be={}",
+                    dst_port.to_be(),
+                    src_port.to_be()
+                );
+                // Use WAN IPv6 as source
+                wan
+            } else {
+                proxy_src
+            }
+        } else {
+            proxy_src
+        }
+    };
+
+    #[cfg(not(feature = "dev-mode"))]
+    let final_src: [u8; 16] = proxy_src;
+
+    // Rewrite src → final source address
+    for (i, byte) in final_src.iter().enumerate() {
+        ctx.store(ipv6_src_offset + i, byte, 0).map_err(|_| ())?;
     }
 
     // Incremental L4 checksum updates.
-    update_addr_csum(ctx, csum_offset, &orig_src, &proxy_src)?;
+    update_addr_csum(ctx, csum_offset, &orig_src, &final_src)?;
     update_addr_csum(ctx, csum_offset, &dst_ipv6, &nat_entry.origin_ipv6)?;
-
-    info!(ctx, "tc_ingress: rewrote domain_id={}", domain_id);
 
     Ok(TC_ACT_OK)
 }
@@ -344,7 +553,7 @@ fn try_tc_ingress(ctx: &mut TcContext) -> Result<i32, ()> {
 //   dst → client VIP (fd00:abcd:0:1::<client_id>)
 // Then redirect to xfrm0 (which will encrypt via IPSec and deliver to client).
 //
-// On any decode failure (TAG32 mismatch, padding error, both keys fail)
+// On any decode failure (TAG32 mismatch, padding error, or missing/invalid active key)
 // → TC_ACT_SHOT. This is a forged or corrupted packet targeting our prefix.
 // ---------------------------------------------------------------------------
 
@@ -402,12 +611,12 @@ fn try_tc_ingress_wan(ctx: &mut TcContext) -> Result<i32, ()> {
     // Swap ports to reconstruct the original tc_ingress perspective.
     let flow_ctx = ProxySrcCtx::new(reply_dst_port, reply_src_port, proto_num);
 
-    // Try decode with active key (slot 0), then previous key (slot 1) if needed.
-    let decoded = try_decode_with_keys(&dst_ipv6, &flow_ctx);
+    // Decode with active key (slot 0).
+    let decoded = try_decode_with_active_key(&dst_ipv6, &flow_ctx);
     let (client_id, domain_id) = match decoded {
         Some(ids) => ids,
         None => {
-            // Both keys failed (or no keys populated). Drop as forged/corrupted.
+            // Active key failed (or no key populated). Drop as forged/corrupted.
             return Ok(TC_ACT_SHOT);
         }
     };
@@ -441,20 +650,34 @@ fn try_tc_ingress_wan(ctx: &mut TcContext) -> Result<i32, ()> {
     };
 
     // Rewrite src → synthetic address
-    for i in 0..16 {
-        ctx.store(ipv6_src_offset + i, &synthetic[i], 0)
-            .map_err(|_| ())?;
+    for (i, byte) in synthetic.iter().enumerate() {
+        ctx.store(ipv6_src_offset + i, byte, 0).map_err(|_| ())?;
     }
 
     // Rewrite dst → client VIP
-    for i in 0..16 {
-        ctx.store(ipv6_dst_offset + i, &client_ipv6[i], 0)
-            .map_err(|_| ())?;
+    for (i, byte) in client_ipv6.iter().enumerate() {
+        ctx.store(ipv6_dst_offset + i, byte, 0).map_err(|_| ())?;
     }
 
     // Incremental L4 checksum updates (bpf_csum_diff-based, endian-safe).
     update_addr_csum(ctx, csum_offset, &src_ipv6, &synthetic)?;
     update_addr_csum(ctx, csum_offset, &dst_ipv6, &client_ipv6)?;
+
+    // Dev-mode: xdp_wan rewrites dst from WAN_IPv6 → proxy_src without updating the
+    // checksum (XDP can't properly handle CHECKSUM_COMPLETE). The stored checksum is
+    // still based on WAN_IPv6. The update_addr_csum above only accounts for proxy_src →
+    // client_vip, but the actual change is WAN → client_vip. Add the missing WAN →
+    // proxy_src delta so the incremental chain is correct:
+    //   checksum_in_packet (for WAN) + delta(WAN→proxy_src) + delta(proxy_src→client) = checksum(for client)
+    #[cfg(feature = "dev-mode")]
+    {
+        if let Some(wan_addr) = DEV_WAN_IPV6.get(0) {
+            let wan = *wan_addr;
+            if wan != [0u8; 16] {
+                update_addr_csum(ctx, csum_offset, &wan, &dst_ipv6)?;
+            }
+        }
+    }
 
     // Mark the checksum as CHECKSUM_PARTIAL so the kernel recomputes it on
     // xfrm0 egress.  WAN-ingress packets often arrive with ip_summed =
@@ -469,41 +692,22 @@ fn try_tc_ingress_wan(ctx: &mut TcContext) -> Result<i32, ()> {
     let xfrm_ifindex = XFRM_IFINDEX.get(0);
     let xfrm_ifindex = match xfrm_ifindex {
         Some(idx) if *idx != 0 => *idx,
-        _ => {
-            error!(ctx, "tc_ingress_wan: XFRM_IFINDEX not set, dropping");
-            return Ok(TC_ACT_SHOT);
-        }
+        _ => return Ok(TC_ACT_SHOT),
     };
-
-    info!(
-        ctx,
-        "tc_ingress_wan: rewrote domain_id={}, redirecting to xfrm0", domain_id
-    );
 
     // Redirect to xfrm0 egress so it goes through the IPSec tunnel to the client.
     // bpf_redirect returns TC_ACT_REDIRECT (7) on success.
     Ok(unsafe { bpf_redirect(xfrm_ifindex, 0) } as i32)
 }
 
-/// Try decoding the proxy-source address with active key (slot 0), then
-/// previous key (slot 1) if the first attempt fails and slot 1 is non-zero.
+/// Try decoding the proxy-source address with the active key (slot 0).
 ///
-/// Returns `Some((client_id, domain_id))` on success, `None` if both fail.
-#[inline(always)]
-fn try_decode_with_keys(addr: &[u8; 16], flow_ctx: &ProxySrcCtx) -> Option<(u32, u32)> {
-    // Try active key (slot 0).
-    if let Some(key0) = unsafe { OBFS_KEYS.get(0) } {
+/// Returns `Some((client_id, domain_id))` on success, `None` on failure.
+#[inline(never)]
+fn try_decode_with_active_key(addr: &[u8; 16], flow_ctx: &ProxySrcCtx) -> Option<(u32, u32)> {
+    if let Some(key0) = OBFS_KEYS.get(0) {
         if !key0.is_zero() {
             if let Some(ids) = common::decode_proxy_src(addr, flow_ctx, key0) {
-                return Some(ids);
-            }
-        }
-    }
-
-    // Try previous key (slot 1) for rotation grace window.
-    if let Some(key1) = unsafe { OBFS_KEYS.get(1) } {
-        if !key1.is_zero() {
-            if let Some(ids) = common::decode_proxy_src(addr, flow_ctx, key1) {
                 return Some(ids);
             }
         }

@@ -3,6 +3,10 @@ name = "ebpf"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = []
+dev-mode = ["common/dev-mode"]
+
 [[bin]]
 name = "ebpf"
 path = "src/main.rs"
