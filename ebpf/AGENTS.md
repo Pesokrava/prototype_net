@@ -7,15 +7,16 @@ This directory contains the Linux kernel-side eBPF programs that perform NAT66 (
 One XDP program and two TC classifier programs implement stateless filtering + bidirectional address rewriting. No per-flow state is needed — all reply routing information is encoded into the source address written toward the origin server using obfuscated proxy-source encoding (PRINCE cipher + SipHash-2-4 MAC).
 
 - **`xdp_wan`** (WAN ingress XDP): Parses Ethernet + IPv6 and drops only IPv6 packets
-  whose destination is outside `PROXY_SRC_PREFIX` (`2001:db8::/32`), with two exceptions
-  that always pass:
-  1. ICMPv6 (NS/NA/RA/RS/PMTU/etc.) — so neighbor discovery and WAN reachability are never blocked.
-  2. Any address found in the **`DEV_PASSTHROUGH`** map — used in dev-NAT mode so that
-     conntrack MASQUERADE reply packets (arriving with the server's ISP IPv6 as destination)
-     can reach the kernel stack before being un-NATed and hairpinned back.
-  Non-IPv6 and parse failures return `XDP_PASS` (fail open). In production `DEV_PASSTHROUGH`
-  is empty, so the additional map lookup is a single failed probe per non-matching packet —
-  negligible overhead.
+  whose destination is outside `PROXY_SRC_PREFIX` (`2001:db8::/32`), with one exception
+  that always passes: ICMPv6 (NS/NA/RA/RS/PMTU/etc.) — so neighbor discovery and WAN
+  reachability are never blocked.
+  Non-IPv6 and parse failures return `XDP_PASS` (fail open).
+  In dev-mode, `xdp_wan` additionally detects reply packets (dst = WAN IPv6) by looking up
+  `REPLY_TRACK`. On a hit, it rewrites the destination from WAN IPv6 back to the original
+  proxy-source address using raw pointer writes (no checksum update — the downstream
+  `tc_ingress_wan` compensates). Returns `XDP_PASS` so the rewritten packet enters the kernel
+  stack and is processed normally by `tc_ingress_wan`. Increments `DBG_COUNTERS` slots to trace
+  decision paths. In production builds the dev-mode code is not compiled in — zero overhead.
 
 - **`tc_ingress`** (client→origin, attached to `xfrm0` ingress): Intercepts outbound packets
   destined for synthetic `fd00:abcd::/32` addresses. Extracts the `domain_id` from the
@@ -55,14 +56,14 @@ offload (`CHECKSUM_COMPLETE`) on WAN ingress.
 
 ## BPF Maps
 
-Four BPF maps are defined here and populated by the userspace `daemon/`:
+Three production BPF maps are defined here and populated by the userspace `daemon/`.
+In dev-mode builds, three additional maps are compiled in (see below).
 
 | Map | Type | Key | Value | Max Entries | Purpose |
 |-----|------|-----|-------|-------------|---------|
 | `NAT_MAP` | HashMap | `u32` (domain_id) | `NatEntry` | 65536 | domain_id → origin IPv6 |
 | `XFRM_IFINDEX` | Array | index 0 | `u32` (ifindex) | 1 | xfrm0 ifindex for bpf_redirect |
 | `OBFS_KEYS` | Array | index 0–1 | `ProxySrcKey` | 2 | proxy-source obfuscation keys |
-| `DEV_PASSTHROUGH` | HashMap | `[u8; 16]` (IPv6 addr) | `u32` | 4 | dev-NAT: addresses xdp_wan always passes |
 
 `XFRM_IFINDEX` holds the kernel interface index of `xfrm0`, written by the daemon at startup,
 used by `tc_ingress_wan` for `bpf_redirect`.
@@ -75,10 +76,18 @@ unrelated traffic.
 Slot 1 is the previous key for manual rotation grace window (optional; zero if unused).
 Written by the daemon at startup from `PROXY_ADDR_KEY_HEX` env var.
 
-`DEV_PASSTHROUGH` enables dev-NAT mode. The daemon writes the server's ISP IPv6 address here
-when `DEV_WAN_IPV6` is set. `xdp_wan` passes any packet whose destination is found in this
-map regardless of prefix. In production this map is always empty and has no effect on the data
-path beyond a single failed hash probe per non-matching packet.
+### Dev-Mode Maps (compile-time only, `#[cfg(feature = "dev-mode")]`)
+
+| Map | Type | Key | Value | Max Entries | Purpose |
+|-----|------|-----|-------|-------------|---------|
+| `DEV_WAN_IPV6` | Array | index 0 | `[u8; 16]` | 1 | Server's WAN IPv6 (auto-detected by daemon) |
+| `REPLY_TRACK` | HashMap | `ReplyTrackKey` | `ReplyTrackValue` | 65536 | Outbound connection tracking for reply handling |
+| `DBG_COUNTERS` | Array | index 0–7 | `u32` | 8 | Debug counters for tracing xdp_wan decision paths |
+
+`DEV_WAN_IPV6` is populated by the daemon at startup via auto-detection from the WAN interface.
+`REPLY_TRACK` is written by `tc_ingress` for each outbound connection and read by `xdp_wan` to
+identify reply packets. `DBG_COUNTERS` is incremented by `xdp_wan` at various decision points
+for debugging. In production builds these maps do not exist — zero overhead.
 
 ## Build Requirements
 
@@ -117,6 +126,5 @@ path beyond a single failed hash probe per non-matching packet.
 - Shared types and helpers come from the `common/` crate (no_std, no `userspace` feature).
 - **No per-flow state**: `tc_ingress` must never write to any flow table. All reply-direction
   routing information must be derivable solely from the proxy-source address in the packet.
-- **`DEV_PASSTHROUGH` must never be populated in production**. It is strictly a dev-NAT
-  mechanism. Populating it in production would allow arbitrary traffic destined for the listed
-  addresses to bypass the prefix filter in `xdp_wan`.
+  (Exception: in dev-mode, `tc_ingress` writes to `REPLY_TRACK` for the double-NAT mechanism,
+  but this code is not compiled into production builds.)

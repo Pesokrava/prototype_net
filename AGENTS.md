@@ -15,13 +15,13 @@ Client traffic --> IPSec tunnel --> xfrm0 --> ebpf tc_ingress (NAT66) --> origin
                                                           |
                                               ebpf tc_ingress_wan (WAN ingress)
                                                           |
-                                  BPF maps (NAT_MAP, XFRM_IFINDEX, DEV_PASSTHROUGH)
+                                   BPF maps (NAT_MAP, XFRM_IFINDEX, OBFS_KEYS)
 ```
 
 The system works in two phases:
 1. **DNS phase**: The custom DNS server resolves domains, assigns synthetic `fd00:abcd::/32` addresses, and stores mappings in Postgres (which notifies the daemon).
 2. **Data plane**: eBPF programs on XDP + TC hooks rewrite IPv6 addresses in-kernel using a **stateless proxy-source encoding** — no per-flow tables.
-   - `xdp_wan` on `enp0s3` ingress: drops IPv6 packets whose destination is outside `2001:db8::/32` (proxy-source prefix), except ICMPv6 and any addresses present in the `DEV_PASSTHROUGH` map (used for dev-NAT mode). In dev-mode, also detects and rewrites reply packets. Passes everything else including non-IPv6 and parse failures.
+   - `xdp_wan` on `enp0s3` ingress: drops IPv6 packets whose destination is outside `2001:db8::/32` (proxy-source prefix), except ICMPv6 which always passes. In dev-mode, also detects reply packets (dst = WAN IPv6) via `REPLY_TRACK` lookup, rewrites dst back to proxy-source, and returns `XDP_PASS` so `tc_ingress_wan` handles them normally. Passes everything else including non-IPv6 and parse failures.
    - `tc_ingress` on `xfrm0` ingress: rewrites synthetic dst→origin and src→`proxy_src_ipv6(client_id, domain_id)` for client→origin traffic. In dev-mode, rewrites src→WAN_IPV6 instead and tracks connections in `REPLY_TRACK`. The encoded source address carries all reply-routing information; no flow state is written.
    - `tc_ingress_wan` on `enp0s3` ingress: decodes `client_id` and `domain_id` from the packet's destination address (the proxy-source written by `tc_ingress`), verifies source against `NAT_MAP`, rewrites src→synthetic and dst→client VIP, then redirects to `xfrm0` for IPSec re-encapsulation.
 
@@ -56,7 +56,7 @@ All runtime configuration is via environment variables. See `.env.example` for t
 Each top-level subdirectory contains its own `AGENTS.md` with detailed context about that directory's purpose, contents, and conventions:
 
 - [`common/AGENTS.md`](common/AGENTS.md) -- Shared `#[repr(C)]` BPF map types and address helpers (`no_std` compatible, used by both eBPF and userspace). Constants generated from `contract.toml` via `build.rs`. Dev-mode types (`ReplyTrackKey`, `ReplyTrackValue`) behind `dev-mode` feature.
-- [`ebpf/AGENTS.md`](ebpf/AGENTS.md) -- XDP + TC NAT66 eBPF programs (`xdp_wan` and `tc_ingress_wan` on WAN, `tc_ingress` on xfrm0) with stateless proxy-source address encoding (nightly Rust, `bpfel-unknown-none` target). Dev-mode maps (`DEV_WAN_IPV6`, `WAN_IFINDEX`, `REPLY_TRACK`) behind `dev-mode` feature.
+- [`ebpf/AGENTS.md`](ebpf/AGENTS.md) -- XDP + TC NAT66 eBPF programs (`xdp_wan` and `tc_ingress_wan` on WAN, `tc_ingress` on xfrm0) with stateless proxy-source address encoding (nightly Rust, `bpfel-unknown-none` target). Dev-mode maps (`DEV_WAN_IPV6`, `REPLY_TRACK`, `DBG_COUNTERS`) behind `dev-mode` feature.
 - [`daemon/AGENTS.md`](daemon/AGENTS.md) -- Userspace daemon: eBPF loader, BPF map sync from Postgres, periodic DNS re-resolution. Auto-detects WAN IPv6 and populates dev-mode maps when built with `dev-mode` feature.
 - [`dns-server/AGENTS.md`](dns-server/AGENTS.md) -- Custom DNS server: mints synthetic AAAA records, stores mappings in Postgres.
 - [`xtask/AGENTS.md`](xtask/AGENTS.md) -- Build automation: cross-compiling eBPF and `verify-contract` config drift detection. Supports `--dev-mode` flag for building dev-mode eBPF.
@@ -97,8 +97,8 @@ No veth pairs, ip6tables, policy routing, or environment variables needed.
 | Map | Type | Purpose |
 |:----|:-----|:--------|
 | `DEV_WAN_IPV6` | Array[1] | Server's WAN IPv6 address |
-| `WAN_IFINDEX` | Array[1] | WAN interface index for bpf_redirect |
 | `REPLY_TRACK` | HashMap | Tracks outbound connections for reply handling |
+| `DBG_COUNTERS` | Array[8] | Debug counters for tracing xdp_wan decision paths |
 
 Key: `(origin_ipv6, origin_port, translated_port, proto)`  
 Value: `proxy_source` address to restore in replies

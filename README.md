@@ -49,10 +49,11 @@ OUTBOUND (tc_ingress on xfrm0):
 REPLY (xdp_wan on enp0s3):
   Reply arrives: dst = WAN_IPV6, src = origin:port
   If REPLY_TRACK match:
-    Rewrite dst: WAN_IPV6 -> proxy_source
-    bpf_redirect(ingress) for second pass
-  Second pass:
-    Normal tc_ingress_wan processing
+    Rewrite dst: WAN_IPV6 -> proxy_source (no checksum update)
+    XDP_PASS -> kernel stack
+  tc_ingress_wan picks up rewritten packet:
+    Normal processing with compensating checksum update
+    Redirects to xfrm0
 ```
 
 ## Single source of truth

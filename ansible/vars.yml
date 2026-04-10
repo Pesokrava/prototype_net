@@ -28,9 +28,6 @@ proxy_addr_key_hex: "01b0d4931c5ff7f2f53701134c111a0c4ef6b864dd63870682798272d5f
 # Optional: previous key for manual key rotation grace window.
 # proxy_addr_prev_key_hex: ""
 
-# Dev-NAT: server's WAN IPv6 for xdp_wan passthrough (optional).
-# Set this when using dev-NAT (make dev-nat-up) to allow conntrack MASQUERADE
-# replies to pass xdp_wan and be hairpinned back through the normal return path.
-# Find the value after running: sudo ./dev/dev-nat-up.sh enp0s3
-# Leave commented out (or empty) in production — DEV_PASSTHROUGH stays empty.
+# Dev-mode is now a build-time Cargo feature — the daemon auto-detects the WAN
+# IPv6 address at startup. No Ansible variable needed.
 # dev_wan_ipv6: ""

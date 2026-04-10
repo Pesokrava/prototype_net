@@ -6,9 +6,7 @@ This directory contains scripts and configuration for the local development envi
 
 ```
 dev/
-├── build-vm.yaml      # Lima VM config for building Linux binaries on macOS
-├── dev-nat-up.sh      # NO-OP placeholder (dev-mode is now build-time)
-└── dev-nat-down.sh    # NO-OP placeholder (dev-mode is now build-time)
+└── build-vm.yaml      # Lima VM config for building Linux binaries on macOS
 ```
 
 ## `build-vm.yaml` — Lima Build VM
@@ -80,13 +78,13 @@ Dev-mode:
 Reply arrives: dst = WAN_IPV6, src = origin:443
 
   If REPLY_TRACK[(origin, ports)] found:
-    Rewrite dst: WAN_IPV6 → proxy_source
-    Fix checksum
-    bpf_redirect(enp0s3, BPF_F_INGRESS)  # second pass
+    Rewrite dst: WAN_IPV6 → proxy_source (no checksum update)
+    Return XDP_PASS → kernel stack
 
-  Second pass:
-    dst = proxy_source → XDP_PASS
-    tc_ingress_wan: normal processing, redirects to xfrm0
+  tc_ingress_wan picks up rewritten packet:
+    dst = proxy_source → normal processing
+    Compensating checksum update for the XDP rewrite
+    Redirects to xfrm0
 ```
 
 ### Deployment
@@ -98,7 +96,6 @@ Reply arrives: dst = WAN_IPV6, src = origin:443
 The daemon logs will show:
 ```
 Dev-mode: set DEV_WAN_IPV6[0] = 2a01:xxxx:xxxx::xxxx (auto-detected from enp0s3)
-Dev-mode: set WAN_IFINDEX[0] = 2 (enp0s3)
 ```
 
 ### Switching Back to Production
@@ -118,9 +115,9 @@ Production builds have zero dev-mode overhead — the dev-mode code is not compi
 
 | Map | Type | Purpose |
 |:----|:-----|:--------|
-| `DEV_WAN_IPV6` | Array[1] | Server's WAN IPv6 address |
-| `WAN_IFINDEX` | Array[1] | WAN interface index for bpf_redirect |
+| `DEV_WAN_IPV6` | Array[1] | Server's WAN IPv6 address (auto-detected) |
 | `REPLY_TRACK` | HashMap | Tracks outbound connections for reply handling |
+| `DBG_COUNTERS` | Array[8] | Debug counters for tracing xdp_wan decision paths |
 
 Key: `(origin_ipv6, origin_port, translated_port, proto)`
 Value: `proxy_source` address to restore in replies
