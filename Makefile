@@ -69,13 +69,14 @@ LIMA            = limactl shell $(DEV_VM_NAME)
 # Phony targets
 # ---------------------------------------------------------------------------
 
-.PHONY: help dev-up dev-shell dev-build dev-build-ebpf dev-down dev-destroy \
+.PHONY: help dev-up dev-shell dev-build dev-build-ebpf dev-build-ebpf-dev-mode dev-build-dev-mode dev-down dev-destroy \
         certs client-cert \
         vm-up vm-provision vm-ip vm-down vm-ssh terraform-init \
         postgres-up postgres-down \
         deploy deploy-bins deploy-certs deploy-units \
         client-up client-up-mac _client-up client-down \
         test status logs-daemon logs-dns \
+        dev-nat-up dev-nat-down \
         clean clean-certs clean-all
 
 # ---------------------------------------------------------------------------
@@ -87,12 +88,14 @@ help:
 	@echo "prototype_net — available targets"
 	@echo ""
 	@echo "  Lima build VM  (x86_64 Ubuntu, builds Linux binaries natively)"
-	@echo "    dev-up         Create + start the Lima build VM"
-	@echo "    dev-shell      Open an interactive shell inside the build VM"
-	@echo "    dev-build      Build eBPF + daemon + dns-server inside the VM"
-	@echo "    dev-build-ebpf Build only eBPF inside the VM"
-	@echo "    dev-down       Stop the build VM (disk preserved)"
-	@echo "    dev-destroy    Permanently delete the build VM"
+	@echo "    dev-up                Create + start the Lima build VM"
+	@echo "    dev-shell             Open an interactive shell inside the build VM"
+	@echo "    dev-build             Build eBPF + daemon + dns-server inside the VM"
+	@echo "    dev-build-ebpf        Build only eBPF inside the VM (production)"
+	@echo "    dev-build-ebpf-dev-mode Build eBPF with dev-mode (double-NAT for testing)"
+	@echo "    dev-build-dev-mode    Build all binaries with dev-mode enabled"
+	@echo "    dev-down              Stop the build VM (disk preserved)"
+	@echo "    dev-destroy           Permanently delete the build VM"
 	@echo ""
 	@echo "  Certificates  (runs on macOS)"
 	@echo "    certs          Generate CA + server + test-client cert  (requires SERVER_VM_IP)"
@@ -126,6 +129,10 @@ help:
 	@echo "    logs-daemon    Tail prototype-daemon logs on server VM"
 	@echo "    logs-dns       Tail prototype-dns-server logs on server VM"
 	@echo ""
+	@echo "  Dev-NAT (stateful MASQUERADE for internet roundtrip testing)"
+	@echo "    dev-nat-up     Create veth pair + policy routing + MASQUERADE on server VM"
+	@echo "    dev-nat-down   Tear down dev-NAT on server VM"
+	@echo ""
 	@echo "  Clean"
 	@echo "    clean          Remove cargo build artifacts (target/)"
 	@echo "    clean-certs    Remove generated certificates (certs/output/)"
@@ -154,7 +161,7 @@ dev-build:
 	$(LIMA) bash -c 'cd $(REPO_PATH) && \
 		source $$HOME/.cargo/env && \
 		echo "--- eBPF ---" && \
-		cargo xtask build-ebpf && \
+		cargo --config "build.target=\"aarch64-unknown-linux-gnu\"" xtask build-ebpf && \
 		echo "--- userspace binaries (x86_64-unknown-linux-gnu) ---" && \
 		cargo build --release -p daemon -p dns-server --target $(LINUX_TARGET) && \
 		echo "" && \
@@ -165,8 +172,27 @@ dev-build-ebpf:
 	@echo "==> Building eBPF inside Lima VM '$(DEV_VM_NAME)'..."
 	$(LIMA) bash -c 'cd $(REPO_PATH) && \
 		source $$HOME/.cargo/env && \
-		cargo xtask build-ebpf'
+		cargo --config "build.target=\"aarch64-unknown-linux-gnu\"" xtask build-ebpf'
 	@echo "==> eBPF build complete."
+
+dev-build-ebpf-dev-mode:
+	@echo "==> Building eBPF with dev-mode inside Lima VM '$(DEV_VM_NAME)'..."
+	$(LIMA) bash -c 'cd $(REPO_PATH) && \
+		source $$HOME/.cargo/env && \
+		cargo --config "build.target=\"aarch64-unknown-linux-gnu\"" xtask build-ebpf --dev-mode'
+	@echo "==> eBPF dev-mode build complete."
+
+dev-build-dev-mode:
+	@echo "==> Building dev-mode binaries inside Lima VM '$(DEV_VM_NAME)'..."
+	$(LIMA) bash -c 'cd $(REPO_PATH) && \
+		source $$HOME/.cargo/env && \
+		echo "--- eBPF (dev-mode) ---" && \
+		cargo --config "build.target=\"aarch64-unknown-linux-gnu\"" xtask build-ebpf --dev-mode && \
+		echo "--- userspace binaries (dev-mode) ---" && \
+		cargo build --release -p daemon --features dev-mode -p dns-server --target $(LINUX_TARGET) && \
+		echo "" && \
+		echo "==> Build complete:" && \
+		ls -lh $(REPO_PATH)/$(RELEASE_DIR)/daemon $(REPO_PATH)/$(RELEASE_DIR)/dns-server'
 
 dev-down:
 	@echo "==> Stopping Lima build VM '$(DEV_VM_NAME)'..."
@@ -364,7 +390,26 @@ deploy-units:
 			-e 's/{{ postgres_password }}/$(TF_VAR_postgres_password)/g' \
 			-e 's/{{ host_bridge_ip }}/$(TF_VAR_host_bridge_ip)/g' \
 			-e 's/{{ dns_listen_addr }}/$(TF_VAR_dns_listen_addr)/g' \
-			"$$TMPL/$$1"; \
+			-e 's/{{ proxy_addr_key_hex }}/$(PROXY_ADDR_KEY_HEX)/g' \
+			"$$TMPL/$$1" | \
+		if [ -n "$(PROXY_ADDR_PREV_KEY_HEX)" ]; then \
+			sed \
+				-e '/{% if proxy_addr_prev_key_hex is defined and proxy_addr_prev_key_hex %}/d' \
+				-e 's/{{ proxy_addr_prev_key_hex }}/$(PROXY_ADDR_PREV_KEY_HEX)/g' \
+				-e '/{% endif %}/d'; \
+		else \
+			sed \
+				-e '/{% if proxy_addr_prev_key_hex is defined and proxy_addr_prev_key_hex %}/,/{% endif %}/d'; \
+		fi | \
+		if [ -n "$(DEV_WAN_IPV6)" ]; then \
+			sed \
+				-e '/{% if dev_wan_ipv6 is defined and dev_wan_ipv6 %}/d' \
+				-e 's/{{ dev_wan_ipv6 }}/$(DEV_WAN_IPV6)/g' \
+				-e '/{% endif %}/d'; \
+		else \
+			sed \
+				-e '/{% if dev_wan_ipv6 is defined and dev_wan_ipv6 %}/,/{% endif %}/d'; \
+		fi; \
 	}; \
 	render prototype-xfrm0.service.j2       | $(SSH) 'sudo tee /etc/systemd/system/prototype-xfrm0.service > /dev/null'; \
 	render prototype-swanctl-load.service.j2 | $(SSH) 'sudo tee /etc/systemd/system/prototype-swanctl-load.service > /dev/null'; \
@@ -455,6 +500,31 @@ logs-daemon:
 logs-dns:
 	$(call require,SERVER_VM_IP)
 	$(SSH) 'sudo journalctl -fu prototype-dns-server'
+
+# ---------------------------------------------------------------------------
+# Dev-NAT (stateful MASQUERADE for internet roundtrip testing)
+# ---------------------------------------------------------------------------
+#
+# Creates a veth pair + policy routing + ip6tables MASQUERADE so that outbound
+# proxy-source (2001:db8::/32) traffic is NATed to the server's ISP IPv6 before
+# leaving enp0s3.  Return traffic is un-NATed by conntrack and hairpinned back
+# through enp0s3 ingress where xdp_wan + tc_ingress_wan process it normally.
+#
+# After running dev-nat-up, restart the daemon with DEV_WAN_IPV6=<printed addr>
+# so the daemon populates the DEV_PASSTHROUGH BPF map.
+# ---------------------------------------------------------------------------
+
+dev-nat-up:
+	$(call require,SERVER_VM_IP)
+	@echo "==> Setting up dev-NAT on server VM..."
+	$(SCP) dev/dev-nat-up.sh ubuntu@$(VM_IP):/tmp/dev-nat-up.sh
+	$(SSH) 'chmod +x /tmp/dev-nat-up.sh && sudo /tmp/dev-nat-up.sh enp0s3'
+
+dev-nat-down:
+	$(call require,SERVER_VM_IP)
+	@echo "==> Tearing down dev-NAT on server VM..."
+	$(SCP) dev/dev-nat-down.sh ubuntu@$(VM_IP):/tmp/dev-nat-down.sh
+	$(SSH) 'chmod +x /tmp/dev-nat-down.sh && sudo /tmp/dev-nat-down.sh enp0s3'
 
 # ---------------------------------------------------------------------------
 # Clean

@@ -1,6 +1,6 @@
 use std::{fs, path::PathBuf, process::Command};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use serde::Deserialize;
 
@@ -15,7 +15,11 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Build the eBPF program with the nightly toolchain.
-    BuildEbpf,
+    BuildEbpf {
+        /// Enable dev-mode for double-NAT testing (not for production).
+        #[arg(long)]
+        dev_mode: bool,
+    },
     /// Verify that all config files match the constants in contract.toml.
     VerifyContract,
     /// Decode an obfuscated proxy-source IPv6 address to recover client_id and domain_id.
@@ -42,7 +46,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::BuildEbpf => build_ebpf(),
+        Commands::BuildEbpf { dev_mode } => build_ebpf(dev_mode),
         Commands::VerifyContract => verify_contract(),
         Commands::DecodeProxySrc {
             key,
@@ -147,7 +151,7 @@ fn verify_contract() -> Result<()> {
             }
         };
 
-        if !content.contains(pattern.as_ref() as &str) {
+        if !content.contains(pattern as &str) {
             failures.push(format!(
                 "ERROR: {} — expected pattern not found ({})\n  {}",
                 rel_path, description, pattern
@@ -258,22 +262,30 @@ fn format_ipv6(bytes: &[u8; 16]) -> String {
 // build_ebpf
 // ---------------------------------------------------------------------------
 
-fn build_ebpf() -> Result<()> {
+fn build_ebpf(dev_mode: bool) -> Result<()> {
     // Ensure all config files are consistent with contract.toml before building.
     verify_contract()?;
 
     let workspace = workspace_root()?;
 
+    let mut args = vec![
+        "+nightly".to_string(),
+        "build".to_string(),
+        "-Z".to_string(),
+        "build-std=core".to_string(),
+        "--target".to_string(),
+        "bpfel-unknown-none".to_string(),
+        "--release".to_string(),
+    ];
+
+    if dev_mode {
+        args.push("--features".to_string());
+        args.push("dev-mode".to_string());
+        eprintln!("Building eBPF with dev-mode enabled (double-NAT for testing)");
+    }
+
     let status = Command::new("cargo")
-        .args([
-            "+nightly",
-            "build",
-            "-Z",
-            "build-std=core",
-            "--target",
-            "bpfel-unknown-none",
-            "--release",
-        ])
+        .args(&args)
         .env("CARGO_TARGET_DIR", workspace.join("target"))
         .current_dir(workspace.join("ebpf"))
         .status()
