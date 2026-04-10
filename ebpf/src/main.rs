@@ -33,8 +33,6 @@ static NAT_MAP: HashMap<u32, NatEntry> = HashMap::with_max_entries(65536, 0);
 #[map]
 static XFRM_IFINDEX: Array<u32> = Array::with_max_entries(1, 0);
 
-// WAN_IFINDEX removed: xdp_wan now uses XDP_PASS after rewrite instead of bpf_redirect.
-
 /// Slot 0 = active key, slot 1 = previous key (zero if no rotation in progress).
 /// Written by daemon at startup.
 #[map]
@@ -118,8 +116,6 @@ const BPF_F_PSEUDO_HDR: u64 = 1 << 4;
 /// sidesteps CHECKSUM_COMPLETE interactions on NIC-offloaded ingress packets.
 /// Corresponds to BPF_F_MARK_MANGLED_0 = (1 << 5) from include/uapi/linux/bpf.h.
 const BPF_F_MARK_MANGLED_0: u64 = 1 << 5;
-
-// BPF_F_INGRESS removed: no longer needed after switching xdp_wan from bpf_redirect to XDP_PASS.
 
 /// Update the L4 checksum for a single address change (one 16-byte IPv6 address).
 ///
@@ -349,8 +345,6 @@ fn try_xdp_wan(ctx: &XdpContext) -> Result<u32, ()> {
 
     Ok(XDP_DROP)
 }
-
-// csum_increment removed: replaced by inline one's complement fold in xdp_wan REPLY_TRACK hit path.
 
 /// Extract L4 ports from XDP context.
 #[cfg(feature = "dev-mode")]

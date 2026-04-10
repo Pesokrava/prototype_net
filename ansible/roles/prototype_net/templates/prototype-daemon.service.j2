@@ -17,9 +17,6 @@ Environment=PROXY_ADDR_KEY_HEX={{ proxy_addr_key_hex }}
 {% if proxy_addr_prev_key_hex is defined and proxy_addr_prev_key_hex %}
 Environment=PROXY_ADDR_PREV_KEY_HEX={{ proxy_addr_prev_key_hex }}
 {% endif %}
-{% if dev_wan_ipv6 is defined and dev_wan_ipv6 %}
-Environment=DEV_WAN_IPV6={{ dev_wan_ipv6 }}
-{% endif %}
 Restart=on-failure
 RestartSec=5
 

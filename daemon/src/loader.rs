@@ -205,7 +205,6 @@ pub fn load_and_attach(
             .context("failed to write DEV_WAN_IPV6[0]")?;
         info!("Dev-mode: set DEV_WAN_IPV6[0] = {} (auto-detected from {})", wan_ipv6, wan_iface);
 
-        // WAN_IFINDEX removed: xdp_wan now uses XDP_PASS after rewrite instead of bpf_redirect.
     }
 
     Ok(bpf)

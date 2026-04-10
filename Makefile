@@ -76,7 +76,6 @@ LIMA            = limactl shell $(DEV_VM_NAME)
         deploy deploy-bins deploy-certs deploy-units \
         client-up client-up-mac _client-up client-down \
         test status logs-daemon logs-dns \
-        dev-nat-up dev-nat-down \
         clean clean-certs clean-all
 
 # ---------------------------------------------------------------------------
@@ -128,10 +127,6 @@ help:
 	@echo "    status         Show systemd service status on server VM"
 	@echo "    logs-daemon    Tail prototype-daemon logs on server VM"
 	@echo "    logs-dns       Tail prototype-dns-server logs on server VM"
-	@echo ""
-	@echo "  Dev-NAT (stateful MASQUERADE for internet roundtrip testing)"
-	@echo "    dev-nat-up     Create veth pair + policy routing + MASQUERADE on server VM"
-	@echo "    dev-nat-down   Tear down dev-NAT on server VM"
 	@echo ""
 	@echo "  Clean"
 	@echo "    clean          Remove cargo build artifacts (target/)"
@@ -401,15 +396,8 @@ deploy-units:
 			sed \
 				-e '/{% if proxy_addr_prev_key_hex is defined and proxy_addr_prev_key_hex %}/,/{% endif %}/d'; \
 		fi | \
-		if [ -n "$(DEV_WAN_IPV6)" ]; then \
-			sed \
-				-e '/{% if dev_wan_ipv6 is defined and dev_wan_ipv6 %}/d' \
-				-e 's/{{ dev_wan_ipv6 }}/$(DEV_WAN_IPV6)/g' \
-				-e '/{% endif %}/d'; \
-		else \
-			sed \
-				-e '/{% if dev_wan_ipv6 is defined and dev_wan_ipv6 %}/,/{% endif %}/d'; \
-		fi; \
+		sed \
+			-e '/{% if dev_wan_ipv6 is defined and dev_wan_ipv6 %}/,/{% endif %}/d'; \
 	}; \
 	render prototype-xfrm0.service.j2       | $(SSH) 'sudo tee /etc/systemd/system/prototype-xfrm0.service > /dev/null'; \
 	render prototype-swanctl-load.service.j2 | $(SSH) 'sudo tee /etc/systemd/system/prototype-swanctl-load.service > /dev/null'; \
@@ -500,31 +488,6 @@ logs-daemon:
 logs-dns:
 	$(call require,SERVER_VM_IP)
 	$(SSH) 'sudo journalctl -fu prototype-dns-server'
-
-# ---------------------------------------------------------------------------
-# Dev-NAT (stateful MASQUERADE for internet roundtrip testing)
-# ---------------------------------------------------------------------------
-#
-# Creates a veth pair + policy routing + ip6tables MASQUERADE so that outbound
-# proxy-source (2001:db8::/32) traffic is NATed to the server's ISP IPv6 before
-# leaving enp0s3.  Return traffic is un-NATed by conntrack and hairpinned back
-# through enp0s3 ingress where xdp_wan + tc_ingress_wan process it normally.
-#
-# After running dev-nat-up, restart the daemon with DEV_WAN_IPV6=<printed addr>
-# so the daemon populates the DEV_PASSTHROUGH BPF map.
-# ---------------------------------------------------------------------------
-
-dev-nat-up:
-	$(call require,SERVER_VM_IP)
-	@echo "==> Setting up dev-NAT on server VM..."
-	$(SCP) dev/dev-nat-up.sh ubuntu@$(VM_IP):/tmp/dev-nat-up.sh
-	$(SSH) 'chmod +x /tmp/dev-nat-up.sh && sudo /tmp/dev-nat-up.sh enp0s3'
-
-dev-nat-down:
-	$(call require,SERVER_VM_IP)
-	@echo "==> Tearing down dev-NAT on server VM..."
-	$(SCP) dev/dev-nat-down.sh ubuntu@$(VM_IP):/tmp/dev-nat-down.sh
-	$(SSH) 'chmod +x /tmp/dev-nat-down.sh && sudo /tmp/dev-nat-down.sh enp0s3'
 
 # ---------------------------------------------------------------------------
 # Clean
