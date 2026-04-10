@@ -72,20 +72,35 @@ inside a template — add a new variable and wire it through the Makefile.
 |:---------|:-------------|:----------------------|
 | `swanctl.conf.j2` | `/etc/swanctl/conf.d/prototype.conf` | `vip_pool_start`, `vip_pool_end`, `synthetic_prefix_cidr`, `xfrm_if_id` |
 | `prototype-xfrm0.service.j2` | `/etc/systemd/system/prototype-xfrm0.service` | `xfrm_if_id` |
-| `prototype-daemon.service.j2` | `/etc/systemd/system/prototype-daemon.service` | `postgres_password`, `host_bridge_ip`, `dns_listen_addr` |
+| `prototype-daemon.service.j2` | `/etc/systemd/system/prototype-daemon.service` | `postgres_password`, `host_bridge_ip`, `dns_listen_addr`, `proxy_addr_key_hex`, optionally `dev_wan_ipv6` |
 | `prototype-dns-server.service.j2` | `/etc/systemd/system/prototype-dns-server.service` | `dns_listen_addr` |
 | `prototype-swanctl-load.service.j2` | `/etc/systemd/system/prototype-swanctl-load.service` | _(none)_ |
+
+`prototype-daemon.service.j2` uses a Jinja2 conditional to include `DEV_WAN_IPV6` only when
+`dev_wan_ipv6` is defined and non-empty:
+
+```jinja2
+{% if dev_wan_ipv6 is defined and dev_wan_ipv6 %}
+Environment=DEV_WAN_IPV6={{ dev_wan_ipv6 }}
+{% endif %}
+```
+
+The `deploy-units` Makefile target replicates this conditional with `sed` range deletion so the
+rendered unit file is correct whether `DEV_WAN_IPV6` is set in `.env` or not.
 
 ## `vars.yml`
 
 Contains runtime/machine-specific variables that are **not** address-space constants:
 
-| Variable | Meaning |
-|:---------|:--------|
-| `host_bridge_ip` | IPv4 address of the hypervisor bridge, reachable from inside the VM |
-| `postgres_password` | Postgres password (must match `.env` / docker-compose) |
-| `server_ipv6` | VM's public IPv6 address, used as NAT source by the eBPF daemon |
-| `dns_listen_addr` | Address the DNS server binds to (default `0.0.0.0`) |
+| Variable | Required | Meaning |
+|:---------|:---------|:--------|
+| `host_bridge_ip` | yes | IPv4 address of the hypervisor bridge, reachable from inside the VM |
+| `postgres_password` | yes | Postgres password (must match `.env` / docker-compose) |
+| `server_ipv6` | yes | VM's public IPv6 address |
+| `dns_listen_addr` | yes | Address the DNS server binds to (default `0.0.0.0`) |
+| `proxy_addr_key_hex` | yes | 64-hex-char proxy-source obfuscation key |
+| `proxy_addr_prev_key_hex` | no | Previous key for rotation grace window |
+| `dev_wan_ipv6` | no | Server's WAN IPv6 for dev-NAT `DEV_PASSTHROUGH` (leave commented out in production) |
 
 Do **not** put address-space constants (`synthetic_prefix`, `xfrm if_id`, pool range) in
 `vars.yml` — those come from `contract.toml` and are passed in by the Makefile.
@@ -100,3 +115,6 @@ Do **not** put address-space constants (`synthetic_prefix`, `xfrm if_id`, pool r
 - The inline strongSwan swanctl config block in `tasks/main.yml` still contains the pool
   range and `remote_ts` values as plain strings — they are checked by
   `cargo xtask verify-contract` and must match `contract.toml`.
+- `dev_wan_ipv6` should only be set when running dev-NAT tests. Never set it in a production
+  deployment — an accidental entry in `DEV_PASSTHROUGH` would allow non-proxy-source traffic
+  destined for that address to bypass the `xdp_wan` prefix filter.

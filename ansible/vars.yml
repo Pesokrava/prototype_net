@@ -23,7 +23,14 @@ dns_listen_addr: "0.0.0.0"
 # 256-bit key for proxy-source address obfuscation (PRINCE + SipHash).
 # Generate with: openssl rand -hex 32
 # Required — the daemon will refuse to start without a valid key.
-proxy_addr_key_hex: ""
+proxy_addr_key_hex: "01b0d4931c5ff7f2f53701134c111a0c4ef6b864dd63870682798272d5f65055"
 
 # Optional: previous key for manual key rotation grace window.
 # proxy_addr_prev_key_hex: ""
+
+# Dev-NAT: server's WAN IPv6 for xdp_wan passthrough (optional).
+# Set this when using dev-NAT (make dev-nat-up) to allow conntrack MASQUERADE
+# replies to pass xdp_wan and be hairpinned back through the normal return path.
+# Find the value after running: sudo ./dev/dev-nat-up.sh enp0s3
+# Leave commented out (or empty) in production — DEV_PASSTHROUGH stays empty.
+# dev_wan_ipv6: ""

@@ -7,9 +7,15 @@ This directory contains the Linux kernel-side eBPF programs that perform NAT66 (
 One XDP program and two TC classifier programs implement stateless filtering + bidirectional address rewriting. No per-flow state is needed — all reply routing information is encoded into the source address written toward the origin server using obfuscated proxy-source encoding (PRINCE cipher + SipHash-2-4 MAC).
 
 - **`xdp_wan`** (WAN ingress XDP): Parses Ethernet + IPv6 and drops only IPv6 packets
-  whose destination is outside both `PROXY_SRC_PREFIX` (return traffic from origins) and
-  `SYNTHETIC_PREFIX` (tunnel traffic). Non-IPv6, ICMPv6, and parse failures return
-  `XDP_PASS` (fail open).
+  whose destination is outside `PROXY_SRC_PREFIX` (`2001:db8::/32`), with two exceptions
+  that always pass:
+  1. ICMPv6 (NS/NA/RA/RS/PMTU/etc.) — so neighbor discovery and WAN reachability are never blocked.
+  2. Any address found in the **`DEV_PASSTHROUGH`** map — used in dev-NAT mode so that
+     conntrack MASQUERADE reply packets (arriving with the server's ISP IPv6 as destination)
+     can reach the kernel stack before being un-NATed and hairpinned back.
+  Non-IPv6 and parse failures return `XDP_PASS` (fail open). In production `DEV_PASSTHROUGH`
+  is empty, so the additional map lookup is a single failed probe per non-matching packet —
+  negligible overhead.
 
 - **`tc_ingress`** (client→origin, attached to `xfrm0` ingress): Intercepts outbound packets
   destined for synthetic `fd00:abcd::/32` addresses. Extracts the `domain_id` from the
@@ -19,7 +25,7 @@ One XDP program and two TC classifier programs implement stateless filtering + b
   `encode_proxy_src(client_id, domain_id, &ctx, key)` to produce an obfuscated proxy-source
   address. Rewrites:
   - `dst` → real origin IPv6 (from `NAT_MAP`)
-  - `src` → obfuscated proxy-source address (PRINCE-encrypted IDs + SipHash TAG32)
+  - `src` → obfuscated proxy-source address in `2001:db8::/32` (PRINCE-encrypted IDs + SipHash TAG32)
 
   No flow table is written. The encoded source address carries all necessary return-path
   information in an opaque, authenticated form.
@@ -49,13 +55,14 @@ offload (`CHECKSUM_COMPLETE`) on WAN ingress.
 
 ## BPF Maps
 
-Three BPF maps are defined here and populated by the userspace `daemon/`:
+Four BPF maps are defined here and populated by the userspace `daemon/`:
 
-| Map | Type | Key | Value | Max Entries |
-|-----|------|-----|-------|-------------|
-| `NAT_MAP` | HashMap | `u32` (domain_id) | `NatEntry` | 65536 |
-| `XFRM_IFINDEX` | Array | index 0 | `u32` (ifindex) | 1 |
-| `OBFS_KEYS` | Array | index 0-1 | `ProxySrcKey` | 2 |
+| Map | Type | Key | Value | Max Entries | Purpose |
+|-----|------|-----|-------|-------------|---------|
+| `NAT_MAP` | HashMap | `u32` (domain_id) | `NatEntry` | 65536 | domain_id → origin IPv6 |
+| `XFRM_IFINDEX` | Array | index 0 | `u32` (ifindex) | 1 | xfrm0 ifindex for bpf_redirect |
+| `OBFS_KEYS` | Array | index 0–1 | `ProxySrcKey` | 2 | proxy-source obfuscation keys |
+| `DEV_PASSTHROUGH` | HashMap | `[u8; 16]` (IPv6 addr) | `u32` | 4 | dev-NAT: addresses xdp_wan always passes |
 
 `XFRM_IFINDEX` holds the kernel interface index of `xfrm0`, written by the daemon at startup,
 used by `tc_ingress_wan` for `bpf_redirect`.
@@ -67,6 +74,11 @@ unrelated traffic.
 `OBFS_KEYS` holds the proxy-source obfuscation keys. Slot 0 is the active key (required).
 Slot 1 is the previous key for manual rotation grace window (optional; zero if unused).
 Written by the daemon at startup from `PROXY_ADDR_KEY_HEX` env var.
+
+`DEV_PASSTHROUGH` enables dev-NAT mode. The daemon writes the server's ISP IPv6 address here
+when `DEV_WAN_IPV6` is set. `xdp_wan` passes any packet whose destination is found in this
+map regardless of prefix. In production this map is always empty and has no effect on the data
+path beyond a single failed hash probe per non-matching packet.
 
 ## Build Requirements
 
@@ -105,3 +117,6 @@ Written by the daemon at startup from `PROXY_ADDR_KEY_HEX` env var.
 - Shared types and helpers come from the `common/` crate (no_std, no `userspace` feature).
 - **No per-flow state**: `tc_ingress` must never write to any flow table. All reply-direction
   routing information must be derivable solely from the proxy-source address in the packet.
+- **`DEV_PASSTHROUGH` must never be populated in production**. It is strictly a dev-NAT
+  mechanism. Populating it in production would allow arbitrary traffic destined for the listed
+  addresses to bypass the prefix filter in `xdp_wan`.

@@ -22,8 +22,9 @@ eBPF-based IPv6 NAT66 transparent proxy using synthetic DNS AAAA records, strong
 - The data plane uses stateless proxy-source address encoding.
 - `daemon` manages `NAT_MAP` (domain_id -> origin IPv6) plus `XFRM_IFINDEX`; legacy reverse/flow map wiring is gone.
 - Server strongSwan config is rendered from Ansible template (`ansible/roles/prototype_net/templates/swanctl.conf.j2`).
+- **Dev-mode**: Build-time Cargo feature (`dev-mode`) enables double-NAT in BPF for testing with internet origin servers despite the proxy-source prefix (`2001:db8::/32`) being non-routable.
 
-Packet path:
+Packet path (production mode):
 
 ```text
 Client DNS query -> dns-server -> Postgres domains table
@@ -35,6 +36,23 @@ Client packet (to fd00:abcd::/32) -> IPSec -> xfrm0 ingress tc_ingress
 Origin reply -> WAN ingress xdp_wan (prefix filter) -> tc_ingress_wan
   tc_ingress_wan: decode client_id/domain_id from dst, verify src via NAT_MAP,
                   rewrite src -> synthetic, dst -> client VIP, redirect to xfrm0
+```
+
+Packet path (dev-mode, for testing with internet origin servers):
+
+```text
+OUTBOUND (tc_ingress on xfrm0):
+  src = client_vip -> src = WAN_IPV6 (auto-detected from interface)
+  dst = synthetic  -> dst = origin
+  REPLY_TRACK[(origin, ports)] = proxy_source
+
+REPLY (xdp_wan on enp0s3):
+  Reply arrives: dst = WAN_IPV6, src = origin:port
+  If REPLY_TRACK match:
+    Rewrite dst: WAN_IPV6 -> proxy_source
+    bpf_redirect(ingress) for second pass
+  Second pass:
+    Normal tc_ingress_wan processing
 ```
 
 ## Single source of truth
@@ -215,6 +233,34 @@ make logs-daemon
 make logs-dns
 make client-down
 make postgres-down
+```
+
+## Dev-Mode (Build-Time Double-NAT for Testing)
+
+The proxy-source prefix (`2001:db8::/32`) is a documentation prefix (RFC 3849) — not globally routable. Production deployments require an ISP that routes this prefix. For testing with internet origin servers, use dev-mode:
+
+```bash
+# Build with dev-mode enabled
+make dev-build-dev-mode
+
+# Deploy and restart
+make deploy-bins
+ssh ubuntu@$SERVER_VM_IP sudo systemctl restart prototype-daemon
+```
+
+Dev-mode is a **compile-time Cargo feature** that:
+- Rewrites outbound source to server's WAN IPv6 (auto-detected)
+- Tracks connections in a BPF map for reply handling
+- Rewrites reply packets back to proxy-source for normal processing
+
+No veth pairs, ip6tables, or policy routing needed. Production builds have zero dev-mode overhead — the code is not compiled in.
+
+To switch back to production:
+
+```bash
+make dev-build
+make deploy-bins
+ssh ubuntu@$SERVER_VM_IP sudo systemctl restart prototype-daemon
 ```
 
 ## Verification (Makefile-first)
