@@ -7,6 +7,8 @@ edition = "2024"
 default = []
 # Enable userspace-only impls (aya::Pod, std conversions)
 userspace = ["aya"]
+# Enable dev-mode for double-NAT testing (not for production)
+dev-mode = []
 
 [dependencies]
 aya = { version = "0.13.1", optional = true }

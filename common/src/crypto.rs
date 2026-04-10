@@ -50,33 +50,45 @@ const SBOX_INV: [u8; 16] = [
 ///
 /// The nibble ordering is irrelevant for this function — every nibble is
 /// independently substituted. We iterate LSB to MSB for simplicity.
-#[inline(always)]
+#[inline(never)]
 fn sbox_layer(x: u64) -> u64 {
-    let mut out: u64 = 0;
-    let mut val = x;
-    let mut shift = 0u32;
-    while shift < 64 {
-        let nibble = (val & 0xF) as usize;
-        out |= (SBOX[nibble] as u64) << shift;
-        val >>= 4;
-        shift += 4;
-    }
-    out
+    (SBOX[(x & 0xF) as usize] as u64)
+        | (SBOX[((x >> 4) & 0xF) as usize] as u64) << 4
+        | (SBOX[((x >> 8) & 0xF) as usize] as u64) << 8
+        | (SBOX[((x >> 12) & 0xF) as usize] as u64) << 12
+        | (SBOX[((x >> 16) & 0xF) as usize] as u64) << 16
+        | (SBOX[((x >> 20) & 0xF) as usize] as u64) << 20
+        | (SBOX[((x >> 24) & 0xF) as usize] as u64) << 24
+        | (SBOX[((x >> 28) & 0xF) as usize] as u64) << 28
+        | (SBOX[((x >> 32) & 0xF) as usize] as u64) << 32
+        | (SBOX[((x >> 36) & 0xF) as usize] as u64) << 36
+        | (SBOX[((x >> 40) & 0xF) as usize] as u64) << 40
+        | (SBOX[((x >> 44) & 0xF) as usize] as u64) << 44
+        | (SBOX[((x >> 48) & 0xF) as usize] as u64) << 48
+        | (SBOX[((x >> 52) & 0xF) as usize] as u64) << 52
+        | (SBOX[((x >> 56) & 0xF) as usize] as u64) << 56
+        | (SBOX[((x >> 60) & 0xF) as usize] as u64) << 60
 }
 
 /// Apply the PRINCE inverse S-box to all 16 nibbles of a 64-bit value.
-#[inline(always)]
+#[inline(never)]
 fn sbox_inv_layer(x: u64) -> u64 {
-    let mut out: u64 = 0;
-    let mut val = x;
-    let mut shift = 0u32;
-    while shift < 64 {
-        let nibble = (val & 0xF) as usize;
-        out |= (SBOX_INV[nibble] as u64) << shift;
-        val >>= 4;
-        shift += 4;
-    }
-    out
+    (SBOX_INV[(x & 0xF) as usize] as u64)
+        | (SBOX_INV[((x >> 4) & 0xF) as usize] as u64) << 4
+        | (SBOX_INV[((x >> 8) & 0xF) as usize] as u64) << 8
+        | (SBOX_INV[((x >> 12) & 0xF) as usize] as u64) << 12
+        | (SBOX_INV[((x >> 16) & 0xF) as usize] as u64) << 16
+        | (SBOX_INV[((x >> 20) & 0xF) as usize] as u64) << 20
+        | (SBOX_INV[((x >> 24) & 0xF) as usize] as u64) << 24
+        | (SBOX_INV[((x >> 28) & 0xF) as usize] as u64) << 28
+        | (SBOX_INV[((x >> 32) & 0xF) as usize] as u64) << 32
+        | (SBOX_INV[((x >> 36) & 0xF) as usize] as u64) << 36
+        | (SBOX_INV[((x >> 40) & 0xF) as usize] as u64) << 40
+        | (SBOX_INV[((x >> 44) & 0xF) as usize] as u64) << 44
+        | (SBOX_INV[((x >> 48) & 0xF) as usize] as u64) << 48
+        | (SBOX_INV[((x >> 52) & 0xF) as usize] as u64) << 52
+        | (SBOX_INV[((x >> 56) & 0xF) as usize] as u64) << 56
+        | (SBOX_INV[((x >> 60) & 0xF) as usize] as u64) << 60
 }
 
 // ---------------------------------------------------------------------------
@@ -107,22 +119,31 @@ const M_HAT_1: [u16; 16] = [
 ];
 
 /// GF(2) matrix-vector multiplication: 16x16 matrix (column vectors) * 16-bit value.
-#[inline(always)]
+#[inline(never)]
 fn gf2_mat_mul(val: u16, cols: &[u16; 16]) -> u16 {
     let mut out: u16 = 0;
-    let mut i = 0u32;
-    while i < 16 {
-        if (val >> i) & 1 == 1 {
-            out ^= cols[i as usize];
-        }
-        i += 1;
-    }
+    out ^= cols[0] & (val & 1).wrapping_neg();
+    out ^= cols[1] & ((val >> 1) & 1).wrapping_neg();
+    out ^= cols[2] & ((val >> 2) & 1).wrapping_neg();
+    out ^= cols[3] & ((val >> 3) & 1).wrapping_neg();
+    out ^= cols[4] & ((val >> 4) & 1).wrapping_neg();
+    out ^= cols[5] & ((val >> 5) & 1).wrapping_neg();
+    out ^= cols[6] & ((val >> 6) & 1).wrapping_neg();
+    out ^= cols[7] & ((val >> 7) & 1).wrapping_neg();
+    out ^= cols[8] & ((val >> 8) & 1).wrapping_neg();
+    out ^= cols[9] & ((val >> 9) & 1).wrapping_neg();
+    out ^= cols[10] & ((val >> 10) & 1).wrapping_neg();
+    out ^= cols[11] & ((val >> 11) & 1).wrapping_neg();
+    out ^= cols[12] & ((val >> 12) & 1).wrapping_neg();
+    out ^= cols[13] & ((val >> 13) & 1).wrapping_neg();
+    out ^= cols[14] & ((val >> 14) & 1).wrapping_neg();
+    out ^= cols[15] & ((val >> 15) & 1).wrapping_neg();
     out
 }
 
 /// M' layer: applies M_hat_0/M_hat_1 to the four 16-bit chunks.
 /// M' is an involution (self-inverse).
-#[inline(always)]
+#[inline(never)]
 fn m_prime(x: u64) -> u64 {
     let c0 = (x & 0xFFFF) as u16;
     let c1 = ((x >> 16) & 0xFFFF) as u16;
@@ -169,31 +190,23 @@ const ROW_MASK: [u64; 4] = [
 ///   shift = 64 - i*16  (right rotate by (64 - i*16) = left rotate by i*16)
 #[inline(always)]
 fn shift_rows(x: u64) -> u64 {
-    let mut out = x & ROW_MASK[0]; // row 0: no shift
-    let mut i = 1u32;
-    while i < 4 {
-        let row = x & ROW_MASK[i as usize];
-        let shift = (i * 16) as u32;
-        // Left rotate row bits by shift positions (within the 64-bit word)
-        out |= (row << shift) | (row >> (64 - shift));
-        i += 1;
-    }
-    out
+    let row0 = x & ROW_MASK[0];
+    let row1 = x & ROW_MASK[1];
+    let row2 = x & ROW_MASK[2];
+    let row3 = x & ROW_MASK[3];
+
+    row0 | row1.rotate_left(16) | row2.rotate_right(32) | row3.rotate_right(16)
 }
 
 /// Inverse ShiftRows.
 #[inline(always)]
 fn shift_rows_inv(x: u64) -> u64 {
-    let mut out = x & ROW_MASK[0]; // row 0: no shift
-    let mut i = 1u32;
-    while i < 4 {
-        let row = x & ROW_MASK[i as usize];
-        let shift = (i * 16) as u32;
-        // Right rotate row bits by shift positions
-        out |= (row >> shift) | (row << (64 - shift));
-        i += 1;
-    }
-    out
+    let row0 = x & ROW_MASK[0];
+    let row1 = x & ROW_MASK[1];
+    let row2 = x & ROW_MASK[2];
+    let row3 = x & ROW_MASK[3];
+
+    row0 | row1.rotate_right(16) | row2.rotate_left(32) | row3.rotate_left(16)
 }
 
 // ---------------------------------------------------------------------------
@@ -219,6 +232,7 @@ fn m_layer_inv(x: u64) -> u64 {
 /// PRINCE core encryption: the 12-round core with key k1.
 ///
 /// Full PRINCE: ciphertext = k0' XOR prince_core(plaintext XOR k0, k1)
+#[inline(never)]
 fn prince_core_encrypt(block: u64, k1: u64) -> u64 {
     let mut s = block;
 
@@ -226,13 +240,11 @@ fn prince_core_encrypt(block: u64, k1: u64) -> u64 {
     s ^= k1 ^ RC[0];
 
     // Forward rounds 1-5
-    let mut r = 1u32;
-    while r <= 5 {
-        s = sbox_layer(s);
-        s = m_layer(s);
-        s ^= RC[r as usize] ^ k1;
-        r += 1;
-    }
+    s = m_layer(sbox_layer(s)) ^ (RC[1] ^ k1);
+    s = m_layer(sbox_layer(s)) ^ (RC[2] ^ k1);
+    s = m_layer(sbox_layer(s)) ^ (RC[3] ^ k1);
+    s = m_layer(sbox_layer(s)) ^ (RC[4] ^ k1);
+    s = m_layer(sbox_layer(s)) ^ (RC[5] ^ k1);
 
     // Middle layer: S -> M' -> S^{-1}
     s = sbox_layer(s);
@@ -240,13 +252,11 @@ fn prince_core_encrypt(block: u64, k1: u64) -> u64 {
     s = sbox_inv_layer(s);
 
     // Inverse rounds 6-10
-    r = 6;
-    while r <= 10 {
-        s ^= k1 ^ RC[r as usize];
-        s = m_layer_inv(s);
-        s = sbox_inv_layer(s);
-        r += 1;
-    }
+    s = sbox_inv_layer(m_layer_inv(s ^ (k1 ^ RC[6])));
+    s = sbox_inv_layer(m_layer_inv(s ^ (k1 ^ RC[7])));
+    s = sbox_inv_layer(m_layer_inv(s ^ (k1 ^ RC[8])));
+    s = sbox_inv_layer(m_layer_inv(s ^ (k1 ^ RC[9])));
+    s = sbox_inv_layer(m_layer_inv(s ^ (k1 ^ RC[10])));
 
     // Post-whitening
     s ^= k1 ^ RC[11];
@@ -260,6 +270,7 @@ fn prince_core_encrypt(block: u64, k1: u64) -> u64 {
 ///
 /// Full PRINCE: ciphertext = k0' XOR prince_core(plaintext XOR k0, k1)
 /// where k0' = (k0 >>> 1) XOR (k0 >> 63).
+#[inline(never)]
 pub fn prince_encrypt(block: u64, key: &[u8; 16]) -> u64 {
     let k0 = u64::from_be_bytes([
         key[0], key[1], key[2], key[3], key[4], key[5], key[6], key[7],
@@ -269,7 +280,7 @@ pub fn prince_encrypt(block: u64, key: &[u8; 16]) -> u64 {
     ]);
 
     // k0' = (k0 >>> 1) XOR (k0 >> 63) — the PRINCE key schedule.
-    let k0_prime = ((k0 >> 1) | (k0 << 63)) ^ (k0 >> 63);
+    let k0_prime = k0.rotate_right(1) ^ (k0 >> 63);
 
     let input = block ^ k0;
     let core_out = prince_core_encrypt(input, k1);
@@ -279,6 +290,7 @@ pub fn prince_encrypt(block: u64, key: &[u8; 16]) -> u64 {
 /// PRINCE decrypt: uses the alpha-reflection property.
 ///
 /// Decryption is PRINCE encryption with k0 and k0' swapped, and k1' = k1 XOR alpha.
+#[inline(never)]
 pub fn prince_decrypt(block: u64, key: &[u8; 16]) -> u64 {
     let k0 = u64::from_be_bytes([
         key[0], key[1], key[2], key[3], key[4], key[5], key[6], key[7],
@@ -287,7 +299,7 @@ pub fn prince_decrypt(block: u64, key: &[u8; 16]) -> u64 {
         key[8], key[9], key[10], key[11], key[12], key[13], key[14], key[15],
     ]);
 
-    let k0_prime = ((k0 >> 1) | (k0 << 63)) ^ (k0 >> 63);
+    let k0_prime = k0.rotate_right(1) ^ (k0 >> 63);
 
     // For decryption: swap k0 and k0', use k1 XOR alpha
     let k1_dec = k1 ^ ALPHA;
@@ -301,10 +313,82 @@ pub fn prince_decrypt(block: u64, key: &[u8; 16]) -> u64 {
 // SipHash-2-4 (128-bit key, 64-bit output) — delegated to `siphasher` crate
 // ===========================================================================
 
+#[inline(always)]
+fn sip_round(v0: &mut u64, v1: &mut u64, v2: &mut u64, v3: &mut u64) {
+    *v0 = v0.wrapping_add(*v1);
+    *v1 = v1.rotate_left(13);
+    *v1 ^= *v0;
+    *v0 = v0.rotate_left(32);
+
+    *v2 = v2.wrapping_add(*v3);
+    *v3 = v3.rotate_left(16);
+    *v3 ^= *v2;
+
+    *v0 = v0.wrapping_add(*v3);
+    *v3 = v3.rotate_left(21);
+    *v3 ^= *v0;
+
+    *v2 = v2.wrapping_add(*v1);
+    *v1 = v1.rotate_left(17);
+    *v1 ^= *v2;
+    *v2 = v2.rotate_left(32);
+}
+
+/// SipHash-2-4 specialized for a fixed 17-byte input.
+///
+/// This avoids variable-length loops in the eBPF path, keeping verifier state
+/// growth bounded while preserving standard SipHash-2-4 output.
+#[inline(never)]
+pub fn siphash_2_4_17(key: &[u8; 16], data: &[u8; 17]) -> u64 {
+    let k0 = u64::from_le_bytes([
+        key[0], key[1], key[2], key[3], key[4], key[5], key[6], key[7],
+    ]);
+    let k1 = u64::from_le_bytes([
+        key[8], key[9], key[10], key[11], key[12], key[13], key[14], key[15],
+    ]);
+
+    let mut v0 = 0x736f6d6570736575 ^ k0;
+    let mut v1 = 0x646f72616e646f6d ^ k1;
+    let mut v2 = 0x6c7967656e657261 ^ k0;
+    let mut v3 = 0x7465646279746573 ^ k1;
+
+    let m0 = u64::from_le_bytes([
+        data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
+    ]);
+    let m1 = u64::from_le_bytes([
+        data[8], data[9], data[10], data[11], data[12], data[13], data[14], data[15],
+    ]);
+    let b = ((17u64) << 56) | (data[16] as u64);
+
+    v3 ^= m0;
+    sip_round(&mut v0, &mut v1, &mut v2, &mut v3);
+    sip_round(&mut v0, &mut v1, &mut v2, &mut v3);
+    v0 ^= m0;
+
+    v3 ^= m1;
+    sip_round(&mut v0, &mut v1, &mut v2, &mut v3);
+    sip_round(&mut v0, &mut v1, &mut v2, &mut v3);
+    v0 ^= m1;
+
+    v3 ^= b;
+    sip_round(&mut v0, &mut v1, &mut v2, &mut v3);
+    sip_round(&mut v0, &mut v1, &mut v2, &mut v3);
+    v0 ^= b;
+
+    v2 ^= 0xff;
+    sip_round(&mut v0, &mut v1, &mut v2, &mut v3);
+    sip_round(&mut v0, &mut v1, &mut v2, &mut v3);
+    sip_round(&mut v0, &mut v1, &mut v2, &mut v3);
+    sip_round(&mut v0, &mut v1, &mut v2, &mut v3);
+
+    v0 ^ v1 ^ v2 ^ v3
+}
+
 /// SipHash-2-4 with 128-bit key, producing a 64-bit hash.
 ///
 /// Thin wrapper around the `siphasher` crate (jedisct1, no_std, audited).
 /// The caller truncates to 32 bits for TAG32.
+#[inline(never)]
 pub fn siphash_2_4(key: &[u8; 16], data: &[u8]) -> u64 {
     use siphasher::sip::SipHasher24;
     SipHasher24::new_with_key(key).hash(data)
@@ -550,5 +634,44 @@ mod tests {
         let h1 = siphash_2_4(&key, &[]);
         let h2 = siphash_2_4(&key, &[]);
         assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn siphash_fixed_17_matches_reference() {
+        let key: [u8; 16] = [
+            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
+            0x0e, 0x0f,
+        ];
+        let input: [u8; 17] = [
+            0x20, 0x01, 0x0d, 0xb8, 0x13, 0x57, 0x9b, 0xdf, 0x24, 0x68, 0xac, 0xf0, 0x01, 0xbb,
+            0xc3, 0x50, 0x06,
+        ];
+
+        let expected = siphash_2_4(&key, &input);
+        let got = siphash_2_4_17(&key, &input);
+        assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn siphash_fixed_17_matches_reference_many_inputs() {
+        let key: [u8; 16] = [
+            0xf0, 0xe1, 0xd2, 0xc3, 0xb4, 0xa5, 0x96, 0x87, 0x78, 0x69, 0x5a, 0x4b, 0x3c, 0x2d,
+            0x1e, 0x0f,
+        ];
+
+        for seed in 0u8..32u8 {
+            let mut input = [0u8; 17];
+            let mut i = 0usize;
+            while i < 17 {
+                input[i] = seed
+                    .wrapping_mul(17)
+                    .wrapping_add((i as u8).wrapping_mul(29));
+                i += 1;
+            }
+
+            let expected = siphash_2_4(&key, &input);
+            let got = siphash_2_4_17(&key, &input);
+            assert_eq!(got, expected, "seed={seed}");
+        }
     }
 }

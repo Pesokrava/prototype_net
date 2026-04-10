@@ -75,6 +75,43 @@ pub struct NatEntry {
 }
 
 // ---------------------------------------------------------------------------
+// Dev-mode types (only compiled when dev-mode feature is enabled)
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "dev-mode")]
+mod dev_mode_types {
+    /// REPLY_TRACK key: identifies an outbound connection for dev-mode reply handling.
+    ///
+    /// In dev mode, tc_ingress rewrites src to the server's WAN IPv6 and tracks the
+    /// connection here so xdp_wan can rewrite reply packets back to proxy-source.
+    ///
+    /// Fields:
+    /// - origin_ipv6: the origin server's IPv6 address
+    /// - origin_port: the server's port (e.g., 443)
+    /// - translated_port: the source port we chose for the WAN-IPv6 source
+    /// - proto: IP protocol (6=TCP, 17=UDP)
+    #[repr(C)]
+    #[derive(Clone, Copy, Default)]
+    pub struct ReplyTrackKey {
+        pub origin_ipv6: [u8; 16],
+        pub origin_port: u16,     // network byte order
+        pub translated_port: u16, // network byte order
+        pub proto: u8,
+        pub _pad: [u8; 3],
+    }
+
+    /// REPLY_TRACK value: the proxy-source address to restore in replies.
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    pub struct ReplyTrackValue {
+        pub proxy_src: [u8; 16],
+    }
+}
+
+#[cfg(feature = "dev-mode")]
+pub use dev_mode_types::{ReplyTrackKey, ReplyTrackValue};
+
+// ---------------------------------------------------------------------------
 // Helpers — synthetic addresses
 // ---------------------------------------------------------------------------
 
@@ -112,18 +149,82 @@ pub fn synthetic_ipv6(domain_id: u32) -> [u8; 16] {
 }
 
 // ---------------------------------------------------------------------------
-// Proxy-source encoding — obfuscated (PRINCE + SipHash)
+// Proxy-source encoding — lightweight keyed obfuscation
 //
 // Wire format (16 bytes):
 //   bytes 0–3  : PROXY_SRC_PREFIX  (owned public /32)
-//   bytes 4–11 : ENC64 = PRINCE_k(P64)  where P64 = (client24 ‖ domain24 ‖ PAD16) XOR H(ctx)
-//   bytes 12–15: TAG32 = truncate32(SipHash-2-4_k2(prefix ‖ ENC64 ‖ ctx))
+//   bytes 4–11 : ENC64 = keyed reversible mix of P64 where P64 = (client24 ‖ domain24 ‖ PAD16)
+//   bytes 12–15: TAG32 = keyed integrity tag over (ENC64, ctx)
 // ---------------------------------------------------------------------------
+
+#[inline(always)]
+fn mix64(mut x: u64) -> u64 {
+    x ^= x >> 30;
+    x = x.wrapping_mul(0xbf58476d1ce4e5b9);
+    x ^= x >> 27;
+    x = x.wrapping_mul(0x94d049bb133111eb);
+    x ^= x >> 31;
+    x
+}
+
+#[inline(always)]
+fn key_ctx_mix(ctx: &ProxySrcCtx, key: &ProxySrcKey) -> u64 {
+    let k0 = u64::from_be_bytes([
+        key.prince_key[0],
+        key.prince_key[1],
+        key.prince_key[2],
+        key.prince_key[3],
+        key.prince_key[4],
+        key.prince_key[5],
+        key.prince_key[6],
+        key.prince_key[7],
+    ]);
+    let k1 = u64::from_be_bytes([
+        key.prince_key[8],
+        key.prince_key[9],
+        key.prince_key[10],
+        key.prince_key[11],
+        key.prince_key[12],
+        key.prince_key[13],
+        key.prince_key[14],
+        key.prince_key[15],
+    ]);
+    let h = crypto::hash_ctx(ctx);
+    mix64(h ^ k0.rotate_left(11) ^ k1.rotate_right(7) ^ 0x9e3779b97f4a7c15)
+}
+
+#[inline(always)]
+fn tag32(enc64: u64, ctx: &ProxySrcCtx, key: &ProxySrcKey) -> u32 {
+    let k2 = u64::from_be_bytes([
+        key.siphash_key[0],
+        key.siphash_key[1],
+        key.siphash_key[2],
+        key.siphash_key[3],
+        key.siphash_key[4],
+        key.siphash_key[5],
+        key.siphash_key[6],
+        key.siphash_key[7],
+    ]);
+    let k3 = u64::from_be_bytes([
+        key.siphash_key[8],
+        key.siphash_key[9],
+        key.siphash_key[10],
+        key.siphash_key[11],
+        key.siphash_key[12],
+        key.siphash_key[13],
+        key.siphash_key[14],
+        key.siphash_key[15],
+    ]);
+    let ctx_bits =
+        ((ctx.src_port as u64) << 48) | ((ctx.dst_port as u64) << 32) | ((ctx.proto as u64) << 24);
+    let t = mix64(enc64 ^ ctx_bits ^ k2.rotate_left(13) ^ k3.rotate_right(17) ^ 0xa0761d6478bd642f);
+    (t as u32) ^ ((t >> 32) as u32)
+}
 
 /// Encode client_id (24-bit) + domain_id (24-bit) into an obfuscated proxy-source IPv6 address.
 ///
 /// Returns `None` if client_id or domain_id exceed 24-bit range.
-#[inline(always)]
+#[inline(never)]
 pub fn encode_proxy_src(
     client_id: u32,
     domain_id: u32,
@@ -134,42 +235,17 @@ pub fn encode_proxy_src(
         return None;
     }
 
-    // Build 64-bit plaintext: client24 (bits 63-40) | domain24 (bits 39-16) | PAD16=0 (bits 15-0)
+    // Build 64-bit plaintext: client24 (bits 63-40) | domain24 (bits 39-16) | PAD16=0 (bits 15-0).
     let p64: u64 = ((client_id as u64) << 40) | ((domain_id as u64) << 16);
 
-    // Mix in flow context (tweakable encryption).
-    let h = crypto::hash_ctx(ctx);
-    let p64_tweaked = p64 ^ h;
-
-    // Encrypt with PRINCE.
-    let enc64 = crypto::prince_encrypt(p64_tweaked, &key.prince_key);
+    // Lightweight keyed reversible obfuscation.
+    let m = key_ctx_mix(ctx, key);
+    let rot = (m & 63) as u32;
+    let enc64 = p64.rotate_left(rot) ^ m ^ 0xa5a5_a5a5_a5a5_a5a5;
     let enc64_bytes = enc64.to_be_bytes();
 
-    // Build MAC input: prefix(4) || ENC64(8) || src_port(2) || dst_port(2) || proto(1) = 17 bytes
-    let mut mac_input = [0u8; 17];
-    mac_input[0] = PROXY_SRC_PREFIX[0];
-    mac_input[1] = PROXY_SRC_PREFIX[1];
-    mac_input[2] = PROXY_SRC_PREFIX[2];
-    mac_input[3] = PROXY_SRC_PREFIX[3];
-    mac_input[4] = enc64_bytes[0];
-    mac_input[5] = enc64_bytes[1];
-    mac_input[6] = enc64_bytes[2];
-    mac_input[7] = enc64_bytes[3];
-    mac_input[8] = enc64_bytes[4];
-    mac_input[9] = enc64_bytes[5];
-    mac_input[10] = enc64_bytes[6];
-    mac_input[11] = enc64_bytes[7];
-    let sp = ctx.src_port.to_be_bytes();
-    let dp = ctx.dst_port.to_be_bytes();
-    mac_input[12] = sp[0];
-    mac_input[13] = sp[1];
-    mac_input[14] = dp[0];
-    mac_input[15] = dp[1];
-    mac_input[16] = ctx.proto;
-
-    // Compute TAG32 (lower 32 bits of SipHash-2-4).
-    let tag64 = crypto::siphash_2_4(&key.siphash_key, &mac_input);
-    let tag32 = (tag64 as u32).to_be_bytes();
+    // Compute TAG32.
+    let tag32 = tag32(enc64, ctx, key).to_be_bytes();
 
     // Assemble the 16-byte proxy-source address.
     Some([
@@ -194,9 +270,9 @@ pub fn encode_proxy_src(
 
 /// Decode a proxy-source IPv6 address.
 ///
-/// Validates TAG32, decrypts ENC64 via PRINCE, unmixes flow context, and
+/// Validates TAG32, reverses ENC64 obfuscation, and
 /// validates 16-bit zero padding. Returns `None` on any validation failure.
-#[inline(always)]
+#[inline(never)]
 pub fn decode_proxy_src(
     addr: &[u8; 16],
     ctx: &ProxySrcCtx,
@@ -206,42 +282,17 @@ pub fn decode_proxy_src(
     let enc64 = u64::from_be_bytes([
         addr[4], addr[5], addr[6], addr[7], addr[8], addr[9], addr[10], addr[11],
     ]);
-    let enc64_bytes = enc64.to_be_bytes();
     let packet_tag = u32::from_be_bytes([addr[12], addr[13], addr[14], addr[15]]);
 
-    // Rebuild MAC input and verify TAG32.
-    let mut mac_input = [0u8; 17];
-    mac_input[0] = PROXY_SRC_PREFIX[0];
-    mac_input[1] = PROXY_SRC_PREFIX[1];
-    mac_input[2] = PROXY_SRC_PREFIX[2];
-    mac_input[3] = PROXY_SRC_PREFIX[3];
-    mac_input[4] = enc64_bytes[0];
-    mac_input[5] = enc64_bytes[1];
-    mac_input[6] = enc64_bytes[2];
-    mac_input[7] = enc64_bytes[3];
-    mac_input[8] = enc64_bytes[4];
-    mac_input[9] = enc64_bytes[5];
-    mac_input[10] = enc64_bytes[6];
-    mac_input[11] = enc64_bytes[7];
-    let sp = ctx.src_port.to_be_bytes();
-    let dp = ctx.dst_port.to_be_bytes();
-    mac_input[12] = sp[0];
-    mac_input[13] = sp[1];
-    mac_input[14] = dp[0];
-    mac_input[15] = dp[1];
-    mac_input[16] = ctx.proto;
-
-    let expected_tag = crypto::siphash_2_4(&key.siphash_key, &mac_input) as u32;
+    let expected_tag = tag32(enc64, ctx, key);
     if packet_tag != expected_tag {
         return None;
     }
 
-    // Decrypt ENC64.
-    let p64_tweaked = crypto::prince_decrypt(enc64, &key.prince_key);
-
-    // Unmix flow context.
-    let h = crypto::hash_ctx(ctx);
-    let p64 = p64_tweaked ^ h;
+    // Reverse obfuscation.
+    let m = key_ctx_mix(ctx, key);
+    let rot = (m & 63) as u32;
+    let p64 = (enc64 ^ m ^ 0xa5a5_a5a5_a5a5_a5a5).rotate_right(rot);
 
     // Validate PAD16 (lower 16 bits must be zero).
     if (p64 & 0xFFFF) != 0 {
@@ -290,6 +341,12 @@ unsafe impl aya::Pod for NatEntry {}
 
 #[cfg(feature = "userspace")]
 unsafe impl aya::Pod for ProxySrcKey {}
+
+#[cfg(all(feature = "userspace", feature = "dev-mode"))]
+unsafe impl aya::Pod for ReplyTrackKey {}
+
+#[cfg(all(feature = "userspace", feature = "dev-mode"))]
+unsafe impl aya::Pod for ReplyTrackValue {}
 
 // ---------------------------------------------------------------------------
 // Tests
