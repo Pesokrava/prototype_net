@@ -103,6 +103,9 @@ async fn main() -> Result<()> {
     info!("Tunnel interface: {interface_name}");
     info!("WAN interface: {wan_interface}");
 
+    #[cfg(feature = "dev-mode")]
+    info!("Running in DEV MODE - double-NAT enabled for testing");
+
     // Wait indefinitely for the tunnel interface (e.g. xfrm0) to appear.
     // xfrm0 is created by prototype-xfrm0.service; on a fresh server it exists
     // before this service starts (systemd ordering). If it ever disappears and

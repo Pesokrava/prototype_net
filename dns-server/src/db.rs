@@ -5,6 +5,7 @@ use sqlx::postgres::PgPoolOptions;
 pub type DbPool = PgPool;
 
 /// Row returned from the domains table.
+#[allow(dead_code)]
 pub struct DomainRow {
     pub domain_id: i32,
     pub domain: String,

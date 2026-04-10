@@ -68,6 +68,8 @@ fn ifindex(name: &str) -> Result<u32> {
 /// - `wan_iface`: enp0s3 — origin→client reply rewrite + redirect to tunnel
 /// - `active_key`: proxy-source obfuscation key for OBFS_KEYS[0]
 /// - `prev_key`: optional previous key for OBFS_KEYS[1] (rotation grace window)
+///
+/// In dev-mode (build feature), also auto-detects WAN IPv6 and populates DEV_WAN_IPV6 map.
 pub fn load_and_attach(
     tunnel_iface: &str,
     wan_iface: &str,
@@ -85,10 +87,20 @@ pub fn load_and_attach(
 
     let mut bpf = Ebpf::load(elf_bytes).context("failed to load eBPF object")?;
 
-    // Initialize aya-log for eBPF logging
-    if let Err(e) = aya_log::EbpfLogger::init(&mut bpf) {
-        tracing::warn!("Failed to initialize eBPF logger: {e}");
-    }
+    // Initialize aya-log for eBPF logging.
+    // The returned EbpfLogger must be kept alive for the lifetime of the program —
+    // dropping it stops the internal perf-buffer poller and silences all BPF log output.
+    // We intentionally leak it so it lives for 'static.
+    match aya_log::EbpfLogger::init(&mut bpf) {
+        Ok(logger) => {
+            info!("eBPF logger initialized");
+            // Leak the logger so it is never dropped and keeps polling.
+            Box::leak(Box::new(logger));
+        }
+        Err(e) => {
+            tracing::warn!("Failed to initialize eBPF logger: {e}");
+        }
+    };
 
     // Create pin directory
     std::fs::create_dir_all(BPF_PIN_PATH).context("failed to create BPF pin directory")?;
@@ -174,5 +186,50 @@ pub fn load_and_attach(
         info!("Wrote OBFS_KEYS[1] (previous key for rotation grace window)");
     }
 
+    // Dev-mode: auto-detect WAN IPv6 and populate DEV_WAN_IPV6 map.
+    // This enables double-NAT for dev testing: tc_ingress uses WAN IPv6 as source,
+    // and xdp_wan rewrites reply packets back to proxy-source.
+    #[cfg(feature = "dev-mode")]
+    {
+        let wan_ipv6 = get_wan_ipv6(wan_iface)
+            .context("failed to auto-detect WAN IPv6 for dev-mode")?;
+        
+        let mut dev_wan_map: aya::maps::Array<&mut aya::maps::MapData, [u8; 16]> =
+            aya::maps::Array::try_from(
+                bpf.map_mut("DEV_WAN_IPV6")
+                    .context("DEV_WAN_IPV6 map not found")?,
+            )
+            .context("failed to open DEV_WAN_IPV6 as Array")?;
+        dev_wan_map
+            .set(0, wan_ipv6.octets(), 0)
+            .context("failed to write DEV_WAN_IPV6[0]")?;
+        info!("Dev-mode: set DEV_WAN_IPV6[0] = {} (auto-detected from {})", wan_ipv6, wan_iface);
+
+        // WAN_IFINDEX removed: xdp_wan now uses XDP_PASS after rewrite instead of bpf_redirect.
+    }
+
     Ok(bpf)
+}
+
+/// Get the global IPv6 address assigned to a network interface.
+#[cfg(feature = "dev-mode")]
+fn get_wan_ipv6(iface: &str) -> Result<std::net::Ipv6Addr> {
+    let addrs = nix::ifaddrs::getifaddrs()
+        .context("failed to get interface addresses")?;
+    
+    for ifaddr in addrs {
+        if ifaddr.interface_name == iface {
+            if let Some(addr) = ifaddr.address {
+                if let Some(sockaddr_in6) = addr.as_sockaddr_in6() {
+                    let ip = sockaddr_in6.ip();
+                    // Skip link-local addresses (fe80::)
+                    if !ip.is_unicast_link_local() {
+                        return Ok(ip);
+                    }
+                }
+            }
+        }
+    }
+    
+    anyhow::bail!("no global IPv6 address found on interface {}", iface)
 }

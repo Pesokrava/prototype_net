@@ -55,6 +55,7 @@ impl BpfMaps {
     }
 
     /// Remove entries for a given domain_id from NAT_MAP.
+    #[allow(dead_code)]
     pub fn remove_nat_entry(&self, domain_id: u32) -> Result<()> {
         let inner = self.inner.lock().unwrap();
         use std::os::fd::BorrowedFd;
