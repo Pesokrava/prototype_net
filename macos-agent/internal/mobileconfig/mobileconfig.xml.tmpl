@@ -1,0 +1,132 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>PayloadDescription</key>
+	<string>IKEv2 VPN profile for {{.ProfileName}}</string>
+	<key>PayloadDisplayName</key>
+	<string>{{.ProfileName}}</string>
+	<key>PayloadIdentifier</key>
+	<string>net.prototype.{{.ProfileName}}</string>
+	<key>PayloadOrganization</key>
+	<string>prototype-net</string>
+	<key>PayloadType</key>
+	<string>Configuration</string>
+	<key>PayloadUUID</key>
+	<string>{{.ProfileUUID}}</string>
+	<key>PayloadVersion</key>
+	<integer>1</integer>
+	<key>PayloadContent</key>
+	<array>
+		<!-- Payload 1: CA certificate -->
+		<dict>
+			<key>PayloadDisplayName</key>
+			<string>{{.ProfileName}} CA</string>
+			<key>PayloadIdentifier</key>
+			<string>net.prototype.{{.ProfileName}}.ca</string>
+			<key>PayloadType</key>
+			<string>com.apple.security.root</string>
+			<key>PayloadUUID</key>
+			<string>{{.CAPayloadUUID}}</string>
+			<key>PayloadVersion</key>
+			<integer>1</integer>
+			<key>PayloadContent</key>
+			<data>
+{{.CACertB64}}
+			</data>
+		</dict>
+		<!-- Payload 2: Client identity (PKCS#12) -->
+		<dict>
+			<key>Password</key>
+			<string>{{.PKCS12Password}}</string>
+			<key>PayloadDisplayName</key>
+			<string>{{.ProfileName}} Identity</string>
+			<key>PayloadIdentifier</key>
+			<string>net.prototype.{{.ProfileName}}.identity</string>
+			<key>PayloadType</key>
+			<string>com.apple.security.pkcs12</string>
+			<key>PayloadUUID</key>
+			<string>{{.IdentityPayloadUUID}}</string>
+			<key>PayloadVersion</key>
+			<integer>1</integer>
+			<key>PayloadContent</key>
+			<data>
+{{.PKCS12B64}}
+			</data>
+		</dict>
+		<!-- Payload 3: IKEv2 VPN -->
+		<dict>
+			<key>PayloadDisplayName</key>
+			<string>{{.ProfileName}} VPN</string>
+			<key>PayloadIdentifier</key>
+			<string>net.prototype.{{.ProfileName}}.vpn</string>
+			<key>PayloadType</key>
+			<string>com.apple.vpn.managed</string>
+			<key>PayloadUUID</key>
+			<string>{{.VPNPayloadUUID}}</string>
+			<key>PayloadVersion</key>
+			<integer>1</integer>
+			<key>UserDefinedName</key>
+			<string>{{.ProfileName}}</string>
+			<key>VPNType</key>
+			<string>IKEv2</string>
+			<key>IKEv2</key>
+			<dict>
+				<key>AuthenticationMethod</key>
+				<string>Certificate</string>
+				<key>CertificateType</key>
+				<string>RSA</string>
+				<key>ChildSecurityAssociationParameters</key>
+				<dict>
+					<key>DiffieHellmanGroup</key>
+					<integer>20</integer>
+					<key>EncryptionAlgorithm</key>
+					<string>AES-256-GCM</string>
+				</dict>
+				<key>EnableFallback</key>
+				<false/>
+				<key>EnablePFS</key>
+				<true/>
+				<key>IKESecurityAssociationParameters</key>
+				<dict>
+					<key>DiffieHellmanGroup</key>
+					<integer>20</integer>
+					<key>EncryptionAlgorithm</key>
+					<string>AES-256</string>
+					<key>IntegrityAlgorithm</key>
+					<string>SHA2-256</string>
+				</dict>
+				<key>LocalIdentifier</key>
+				<string>{{.ClientID}}</string>
+				<key>PayloadCertificateUUID</key>
+				<string>{{.IdentityPayloadUUID}}</string>
+				<key>RemoteAddress</key>
+				<string>{{.ServerIP}}</string>
+				<key>RemoteIdentifier</key>
+				<string>{{.ServerIP}}</string>
+				<key>ServerCertificateIssuerCommonName</key>
+				<string>{{.CAIssuerCN}}</string>
+			</dict>
+			<key>IPv4</key>
+			<dict>
+				<key>OverridePrimary</key>
+				<integer>0</integer>
+			</dict>
+			<key>IPv6</key>
+			<dict>
+				<key>OverridePrimary</key>
+				<integer>0</integer>
+			</dict>
+			<key>Routes</key>
+			<array>
+				<dict>
+					<key>DestinationAddress</key>
+					<string>{{.RouteDestination}}</string>
+					<key>SubnetPrefixLength</key>
+					<integer>{{.RoutePrefixLen}}</integer>
+				</dict>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>
