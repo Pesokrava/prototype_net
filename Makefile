@@ -76,7 +76,8 @@ LIMA            = limactl shell $(DEV_VM_NAME)
         deploy deploy-bins deploy-certs deploy-units \
         client-up client-up-mac _client-up client-down \
         test status logs-daemon logs-dns \
-        clean clean-certs clean-all
+        clean clean-certs clean-all \
+        agent-build agent-setup agent-start agent-stop agent-status
 
 # ---------------------------------------------------------------------------
 # help
@@ -130,6 +131,13 @@ help:
 	@echo "    clean          Remove cargo build artifacts (target/)"
 	@echo "    clean-certs    Remove generated certificates (certs/output/)"
 	@echo "    clean-all      Everything above + destroy VMs + wipe Docker volumes"
+	@echo ""
+	@echo "  macOS Agent  (Go CLI, runs on macOS)"
+	@echo "    agent-build    Build the macos-agent binary"
+	@echo "    agent-setup    Import client bundle and install VPN profile"
+	@echo "    agent-start    Start VPN and configure DNS"
+	@echo "    agent-stop     Stop VPN and restore DNS"
+	@echo "    agent-status   Show VPN and DNS status"
 	@echo ""
 
 # ---------------------------------------------------------------------------
@@ -487,6 +495,31 @@ clean-all: clean clean-certs
 	@echo "    6. make dev-build"
 	@echo "    7. make deploy"
 	@echo "    8. make client-up"
+
+# ---------------------------------------------------------------------------
+# macOS Agent
+# ---------------------------------------------------------------------------
+
+agent-build:
+	cd macos-agent && go build -o ../target/macos-agent .
+
+agent-setup:
+	$(call require,SERVER_VM_IP)
+	$(call require,BUNDLE_FILE)
+	./target/macos-agent setup \
+		--server-ip $(VM_IP) \
+		--dns-ip $(VM_IP) \
+		--bundle-file $(BUNDLE_FILE) \
+		--contract-file contract.toml
+
+agent-start:
+	./target/macos-agent start
+
+agent-stop:
+	./target/macos-agent stop
+
+agent-status:
+	./target/macos-agent status
 
 # ---------------------------------------------------------------------------
 # Internal helpers
