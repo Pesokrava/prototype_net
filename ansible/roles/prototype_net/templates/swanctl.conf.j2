@@ -1,6 +1,7 @@
 pools {
     client_pool {
         addrs = {{ vip_pool_start }}-{{ vip_pool_end }}
+        dns = {{ host_bridge_ip }}
     }
 }
 connections {
@@ -17,11 +18,12 @@ connections {
         remote {
             auth = pubkey
             cacerts = ca.crt
+            id = %any
         }
         children {
             prototype {
                 esp_proposals = aes256gcm128
-                local_ts = ::/0
+                local_ts = {{ synthetic_prefix_cidr }}
                 remote_ts = {{ synthetic_prefix_cidr }}
                 mode = tunnel
                 if_id_in = {{ xfrm_if_id }}
