@@ -30,8 +30,6 @@ type Params struct {
 	PKCS12Data []byte
 	// PKCS12Password is the password for the PKCS#12 blob.
 	PKCS12Password string
-	// SyntheticPrefix is the IPv6 CIDR for split-tunnel routing (e.g. "fd00:abcd::/32").
-	SyntheticPrefix string
 	// ProfileName is the display name (default: "prototype-net").
 	ProfileName string
 }
@@ -51,19 +49,12 @@ type templateData struct {
 	PKCS12Password      string
 	CACertB64           string
 	PKCS12B64           string
-	RouteDestination    string
-	RoutePrefixLen      int
 }
 
 // Generate creates a .mobileconfig XML file at the given path.
 func Generate(path string, p *Params) error {
 	if p.ProfileName == "" {
 		p.ProfileName = defaultProfileName
-	}
-
-	prefixAddr, prefixLen, err := parseCIDR(p.SyntheticPrefix)
-	if err != nil {
-		return fmt.Errorf("parsing synthetic prefix: %w", err)
 	}
 
 	tmpl, err := template.New("mobileconfig").Parse(profileTemplate)
@@ -83,8 +74,6 @@ func Generate(path string, p *Params) error {
 		PKCS12Password:      p.PKCS12Password,
 		CACertB64:           wrapBase64(p.CACertDER),
 		PKCS12B64:           wrapBase64(p.PKCS12Data),
-		RouteDestination:    prefixAddr,
-		RoutePrefixLen:      prefixLen,
 	}
 
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
@@ -113,20 +102,4 @@ func wrapBase64(b []byte) string {
 		sb.WriteString(encoded)
 	}
 	return sb.String()
-}
-
-// parseCIDR splits "fd00:abcd::/32" into ("fd00:abcd::", 32).
-func parseCIDR(cidr string) (string, int, error) {
-	for i := len(cidr) - 1; i >= 0; i-- {
-		if cidr[i] == '/' {
-			addr := cidr[:i]
-			var prefixLen int
-			_, err := fmt.Sscanf(cidr[i+1:], "%d", &prefixLen)
-			if err != nil {
-				return "", 0, fmt.Errorf("invalid prefix length in %q", cidr)
-			}
-			return addr, prefixLen, nil
-		}
-	}
-	return "", 0, fmt.Errorf("no '/' found in CIDR %q", cidr)
 }

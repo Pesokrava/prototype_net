@@ -13,8 +13,9 @@ import (
 var stopCmd = &cobra.Command{
 	Use:   "stop",
 	Short: "Stop VPN and restore DNS",
-	Long: `Stop the VPN connection, restore original DNS servers,
-and flush the DNS resolver cache.`,
+	Long: `Check VPN status, prompt the user to disconnect via System Settings
+if still connected, restore original DNS servers, and flush the DNS
+resolver cache.`,
 	RunE: runStop,
 }
 
@@ -25,12 +26,21 @@ func runStop(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("loading config: %w", err)
 	}
 
-	// Step 2: Stop VPN.
-	fmt.Printf("==> Stopping VPN '%s'...\n", cfg.ProfileName)
-	if err := vpn.Stop(cfg.ProfileName); err != nil {
-		return fmt.Errorf("stopping VPN: %w", err)
+	// Step 2: Check VPN status and wait for user to disconnect.
+	fmt.Printf("==> Checking VPN '%s' status...\n", cfg.ProfileName)
+	connected, err := vpn.IsConnected(cfg.ProfileName)
+	if err != nil {
+		fmt.Printf("    warning: could not check VPN status: %v\n", err)
+		fmt.Println("    Proceeding with DNS restore anyway.")
+	} else if connected {
+		fmt.Println("    VPN is still connected.")
+		if err := vpn.WaitForDisconnection(cfg.ProfileName, 0); err != nil {
+			return fmt.Errorf("waiting for VPN disconnect: %w", err)
+		}
+		fmt.Println("    VPN disconnected.")
+	} else {
+		fmt.Println("    VPN is already disconnected.")
 	}
-	fmt.Println("    VPN stopped.")
 
 	// Step 3: Restore DNS.
 	if state.DNSBackupExists() {

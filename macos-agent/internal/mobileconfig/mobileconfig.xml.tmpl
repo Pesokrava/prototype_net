@@ -76,56 +76,37 @@
 				<string>Certificate</string>
 				<key>CertificateType</key>
 				<string>RSA</string>
-				<key>ChildSecurityAssociationParameters</key>
-				<dict>
-					<key>DiffieHellmanGroup</key>
-					<integer>20</integer>
-					<key>EncryptionAlgorithm</key>
-					<string>AES-256-GCM</string>
-				</dict>
-				<key>EnableFallback</key>
-				<false/>
-				<key>EnablePFS</key>
-				<true/>
-				<key>IKESecurityAssociationParameters</key>
-				<dict>
-					<key>DiffieHellmanGroup</key>
-					<integer>20</integer>
-					<key>EncryptionAlgorithm</key>
-					<string>AES-256</string>
-					<key>IntegrityAlgorithm</key>
-					<string>SHA2-256</string>
-				</dict>
-				<key>LocalIdentifier</key>
-				<string>{{.ClientID}}</string>
 				<key>PayloadCertificateUUID</key>
 				<string>{{.IdentityPayloadUUID}}</string>
 				<key>RemoteAddress</key>
 				<string>{{.ServerIP}}</string>
 				<key>RemoteIdentifier</key>
 				<string>{{.ServerIP}}</string>
+				<key>LocalIdentifier</key>
+				<string>{{.ClientID}}</string>
 				<key>ServerCertificateIssuerCommonName</key>
 				<string>{{.CAIssuerCN}}</string>
-			</dict>
-			<key>IPv4</key>
-			<dict>
-				<key>OverridePrimary</key>
-				<integer>0</integer>
-			</dict>
-			<key>IPv6</key>
-			<dict>
-				<key>OverridePrimary</key>
-				<integer>0</integer>
-			</dict>
-			<key>Routes</key>
-			<array>
+				<key>IKESecurityAssociationParameters</key>
 				<dict>
-					<key>DestinationAddress</key>
-					<string>{{.RouteDestination}}</string>
-					<key>SubnetPrefixLength</key>
-					<integer>{{.RoutePrefixLen}}</integer>
+					<key>EncryptionAlgorithm</key>
+					<string>AES-256</string>
+					<key>IntegrityAlgorithm</key>
+					<string>SHA2-256</string>
+					<key>DiffieHellmanGroup</key>
+					<integer>20</integer>
 				</dict>
-			</array>
+				<key>ChildSecurityAssociationParameters</key>
+				<dict>
+					<key>EncryptionAlgorithm</key>
+					<string>AES-256-GCM</string>
+					<key>DiffieHellmanGroup</key>
+					<integer>20</integer>
+				</dict>
+				<key>EnablePFS</key>
+				<true/>
+				<key>EnableFallback</key>
+				<false/>
+			</dict>
 		</dict>
 	</array>
 </dict>

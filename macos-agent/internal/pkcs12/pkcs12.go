@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 )
 
 // Result contains the path and password of the generated PKCS#12 file.
@@ -62,15 +63,20 @@ func Generate(clientCertPEM, clientKeyPEM, caCertPEM string) (*Result, func(), e
 	password := hex.EncodeToString(pwBytes)
 
 	// Use openssl to create the PKCS#12 bundle.
-	// -legacy flag ensures compatibility with macOS Keychain import.
-	cmd := exec.Command("openssl", "pkcs12", "-export",
+	// -legacy flag is needed on OpenSSL 3.x for macOS Keychain
+	// compatibility, but LibreSSL (default on macOS) doesn't recognise it.
+	args := []string{"pkcs12", "-export",
 		"-inkey", keyPath,
 		"-in", certPath,
 		"-certfile", caPath,
 		"-out", p12Path,
-		"-passout", "pass:"+password,
-		"-legacy",
-	)
+		"-passout", "pass:" + password,
+	}
+	if opensslSupportsLegacy() {
+		args = append(args, "-legacy")
+	}
+
+	cmd := exec.Command("openssl", args...)
 	cmd.Stderr = os.Stderr
 
 	if err := cmd.Run(); err != nil {
@@ -82,4 +88,18 @@ func Generate(clientCertPEM, clientKeyPEM, caCertPEM string) (*Result, func(), e
 		Path:     p12Path,
 		Password: password,
 	}, cleanup, nil
+}
+
+// opensslSupportsLegacy returns true when the openssl binary is
+// OpenSSL 3.x+ (which requires -legacy for Keychain-compatible PKCS#12).
+// LibreSSL and OpenSSL 1.x do not recognise -legacy and don't need it.
+func opensslSupportsLegacy() bool {
+	out, err := exec.Command("openssl", "version").Output()
+	if err != nil {
+		return false
+	}
+	// "OpenSSL 3.x.y ..." → needs -legacy
+	// "LibreSSL x.y.z"    → does not support -legacy
+	v := strings.TrimSpace(string(out))
+	return strings.HasPrefix(v, "OpenSSL 3") || strings.HasPrefix(v, "OpenSSL 4")
 }

@@ -4,6 +4,7 @@ package bundle
 
 import (
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
@@ -16,6 +17,12 @@ type Bundle struct {
 	ClientCertPEM string `json:"client_cert_pem"`
 	ClientKeyPEM  string `json:"client_key_pem"`
 	ClientID      string `json:"client_id"`
+	// PKCS12B64 is the base64-encoded PKCS#12 blob pre-generated with
+	// OpenSSL 3.x -legacy. Present in bundles generated after the P12
+	// pre-generation change; empty for older bundles.
+	PKCS12B64 string `json:"pkcs12_b64,omitempty"`
+	// PKCS12Password is the password for the pre-generated PKCS#12 blob.
+	PKCS12Password string `json:"pkcs12_password,omitempty"`
 }
 
 // Load reads and validates a client bundle from path.
@@ -86,4 +93,22 @@ func (b *Bundle) CAIssuerCN() (string, error) {
 		return "", fmt.Errorf("CA certificate has empty Subject CN")
 	}
 	return cn, nil
+}
+
+// HasPKCS12 returns true if the bundle contains a pre-generated PKCS#12 blob.
+func (b *Bundle) HasPKCS12() bool {
+	return b.PKCS12B64 != "" && b.PKCS12Password != ""
+}
+
+// DecodePKCS12 decodes the base64-encoded PKCS#12 blob.
+// Returns an error if the bundle doesn't contain a P12 blob.
+func (b *Bundle) DecodePKCS12() ([]byte, error) {
+	if !b.HasPKCS12() {
+		return nil, fmt.Errorf("bundle does not contain pre-generated PKCS#12")
+	}
+	data, err := base64.StdEncoding.DecodeString(b.PKCS12B64)
+	if err != nil {
+		return nil, fmt.Errorf("decoding pkcs12_b64: %w", err)
+	}
+	return data, nil
 }

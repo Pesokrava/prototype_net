@@ -72,17 +72,34 @@ func runSetup(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("parsing CA cert: %w", err)
 	}
 
-	// Step 5: Generate PKCS#12 from PEM.
-	fmt.Println("==> Generating PKCS#12 identity...")
-	p12Result, cleanup, err := pkcs12.Generate(b.ClientCertPEM, b.ClientKeyPEM, b.CACertPEM)
-	if err != nil {
-		return fmt.Errorf("generating PKCS#12: %w", err)
-	}
-	defer cleanup()
+	// Step 5: Get PKCS#12 data — prefer pre-generated from bundle, fall back
+	// to runtime generation if not present.
+	var p12Data []byte
+	var p12Password string
 
-	p12Data, err := os.ReadFile(p12Result.Path)
-	if err != nil {
-		return fmt.Errorf("reading PKCS#12 file: %w", err)
+	if b.HasPKCS12() {
+		fmt.Println("==> Using pre-generated PKCS#12 from bundle...")
+		p12Data, err = b.DecodePKCS12()
+		if err != nil {
+			return fmt.Errorf("decoding pre-generated PKCS#12: %w", err)
+		}
+		p12Password = b.PKCS12Password
+	} else {
+		fmt.Println("==> Bundle has no pre-generated PKCS#12, generating at runtime...")
+		fmt.Println("    WARNING: Runtime P12 generation requires OpenSSL 3.x.")
+		fmt.Println("    LibreSSL (macOS default) produces incompatible P12 files.")
+		fmt.Println("    Re-generate the bundle with gen-client.sh for best results.")
+		p12Result, cleanup, genErr := pkcs12.Generate(b.ClientCertPEM, b.ClientKeyPEM, b.CACertPEM)
+		if genErr != nil {
+			return fmt.Errorf("generating PKCS#12: %w", genErr)
+		}
+		defer cleanup()
+
+		p12Data, err = os.ReadFile(p12Result.Path)
+		if err != nil {
+			return fmt.Errorf("reading PKCS#12 file: %w", err)
+		}
+		p12Password = p12Result.Password
 	}
 
 	// Step 6: Determine profile output path.
@@ -101,14 +118,13 @@ func runSetup(cmd *cobra.Command, args []string) error {
 	fmt.Printf("==> Generating .mobileconfig at %s...\n", profilePath)
 
 	err = mobileconfig.Generate(profilePath, &mobileconfig.Params{
-		ServerIP:        flagServerIP,
-		ClientID:        b.ClientID,
-		CAIssuerCN:      caIssuerCN,
-		CACertDER:       caCert.Raw,
-		PKCS12Data:      p12Data,
-		PKCS12Password:  p12Result.Password,
-		SyntheticPrefix: syntheticPrefix,
-		ProfileName:     profileName,
+		ServerIP:       flagServerIP,
+		ClientID:       b.ClientID,
+		CAIssuerCN:     caIssuerCN,
+		CACertDER:      caCert.Raw,
+		PKCS12Data:     p12Data,
+		PKCS12Password: p12Password,
+		ProfileName:    profileName,
 	})
 	if err != nil {
 		return fmt.Errorf("generating mobileconfig: %w", err)
