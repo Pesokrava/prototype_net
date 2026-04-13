@@ -58,14 +58,15 @@ Each top-level subdirectory contains its own `AGENTS.md` with detailed context a
 - [`common/AGENTS.md`](common/AGENTS.md) -- Shared `#[repr(C)]` BPF map types and address helpers (`no_std` compatible, used by both eBPF and userspace). Constants generated from `contract.toml` via `build.rs`. Dev-mode types (`ReplyTrackKey`, `ReplyTrackValue`) behind `dev-mode` feature.
 - [`ebpf/AGENTS.md`](ebpf/AGENTS.md) -- XDP + TC NAT66 eBPF programs (`xdp_wan` and `tc_ingress_wan` on WAN, `tc_ingress` on xfrm0) with stateless proxy-source address encoding (nightly Rust, `bpfel-unknown-none` target). Dev-mode maps (`DEV_WAN_IPV6`, `REPLY_TRACK`, `DBG_COUNTERS`) behind `dev-mode` feature.
 - [`daemon/AGENTS.md`](daemon/AGENTS.md) -- Userspace daemon: eBPF loader, BPF map sync from Postgres, periodic DNS re-resolution. Auto-detects WAN IPv6 and populates dev-mode maps when built with `dev-mode` feature.
-- [`dns-server/AGENTS.md`](dns-server/AGENTS.md) -- Custom DNS server: mints synthetic AAAA records, stores mappings in Postgres.
+- [`dns-server/AGENTS.md`](dns-server/AGENTS.md) -- Custom DNS server: mints synthetic AAAA records, stores mappings in Postgres. Returns NOERROR (not NXDOMAIN) for A queries — critical for macOS `getaddrinfo()` compatibility.
 - [`xtask/AGENTS.md`](xtask/AGENTS.md) -- Build automation: cross-compiling eBPF and `verify-contract` config drift detection. Supports `--dev-mode` flag for building dev-mode eBPF.
 - [`migrations/AGENTS.md`](migrations/AGENTS.md) -- Postgres schema: `domains` table, `domain_id_seq`, LISTEN/NOTIFY trigger.
-- [`certs/AGENTS.md`](certs/AGENTS.md) -- X.509 certificate generation for strongSwan IKEv2 authentication.
+- [`certs/AGENTS.md`](certs/AGENTS.md) -- X.509 certificate generation for strongSwan IKEv2 authentication. `gen-client.sh` adds `subjectAltName=DNS:<client-id>` for macOS IKEv2 `ID_FQDN` matching.
 - [`client/AGENTS.md`](client/AGENTS.md) -- Docker test client: establishes IPSec tunnel and routes synthetic traffic.
 - [`terraform/AGENTS.md`](terraform/AGENTS.md) -- Libvirt VM provisioning with cloud-init for automated server setup.
 - [`ansible/AGENTS.md`](ansible/AGENTS.md) -- Ansible role for server provisioning: packages, sysctl, strongSwan config, systemd unit templates.
 - [`dev/AGENTS.md`](dev/AGENTS.md) -- Dev tooling scripts: Lima build VM config. Dev-mode is now build-time (no shell scripts needed).
+- [`macos-agent/AGENTS.md`](macos-agent/AGENTS.md) -- Go CLI + Swift `vpnctl` helper for macOS native IKEv2 client. Generates mobileconfig profiles, manages DNS, controls VPN via NEVPNManager.
 
 ## Dev-Mode Implementation
 

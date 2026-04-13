@@ -12,7 +12,7 @@ This is a custom DNS server that intercepts AAAA queries, resolves the real orig
 6. The mapping is upserted into Postgres via `INSERT ... ON CONFLICT (domain) DO UPDATE ... RETURNING domain_id, synthetic_ipv6`. The `RETURNING` clause yields the **actually stored** row — under concurrent inserts for the same domain, the first writer wins and all callers receive the winner's canonical address. `domain_id` and `synthetic_ipv6` are never updated on conflict; only `origin_ipv6`, `ttl_seconds`, and `last_resolved_at` are refreshed.
 7. The synthetic AAAA record from the DB-returned row is sent to the client with a 300-second TTL.
 
-A-record queries and all other record types return NXDOMAIN -- this is an IPv6-only system.
+A-record queries and all other record types return NOERROR with an empty answer section (no records). This is critical for macOS compatibility: returning NXDOMAIN would tell the system resolver that the domain doesn't exist at all, preventing it from following up with an AAAA query. macOS's `getaddrinfo()` queries A and AAAA in parallel or sequence; NXDOMAIN on the A query causes the entire resolution to fail, even if the AAAA would succeed.
 
 ## Key Files
 
