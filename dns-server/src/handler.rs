@@ -52,12 +52,14 @@ impl DnsHandler {
                 self.handle_aaaa(&name, &mut response).await?;
             }
             RecordType::A => {
-                // IPv4-only domains are not supported — return NXDOMAIN for A queries
-                response.set_response_code(ResponseCode::NXDomain);
+                // Return NOERROR with empty answer — domain exists but has no A records.
+                // NXDOMAIN would tell resolvers the domain doesn't exist, preventing
+                // them from following up with an AAAA query.
+                response.set_response_code(ResponseCode::NoError);
             }
             _ => {
-                // All other types → NXDOMAIN
-                response.set_response_code(ResponseCode::NXDomain);
+                // All other types → NOERROR with empty answer
+                response.set_response_code(ResponseCode::NoError);
             }
         }
 
