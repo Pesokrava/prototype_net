@@ -535,6 +535,9 @@ clean-all: clean clean-certs
 
 agent-build:
 	cd macos-agent && go build -o ../target/macos-agent .
+	swiftc -framework NetworkExtension -framework Foundation \
+		-target arm64-apple-macosx15.0 \
+		-o target/vpnctl macos-agent/vpnctl/main.swift
 
 agent-setup:
 	$(call require,SERVER_VM_IP)
